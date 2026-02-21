@@ -3,33 +3,43 @@ from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+
+from .core.logging import configure_logging
+from .core.paths import WorkspacePaths
 from .memory import Memory
-from .tools.secrets import set_secret
 from .orchestrator import Orchestrator
 from .state import load_agents, load_skills_state
+from .tools.secrets import set_secret
 
-APP_PORT = int(os.getenv("AGENT_PLATFORM_PORT","8787"))
+APP_PORT = int(os.getenv("AGENT_PLATFORM_PORT", "8787"))
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+WORKSPACE = WorkspacePaths.from_env()
+configure_logging(WORKSPACE.logs)
 
-memory = Memory(os.path.join(REPO_ROOT, "data", "memory.db"))
-orch = Orchestrator(memory, repo_root=REPO_ROOT)
+memory = Memory(str(WORKSPACE.memory_db))
+orch = Orchestrator(memory, repo_root=REPO_ROOT, workspace_paths=WORKSPACE)
 
 app = FastAPI(title="Agent Platform v4", version="0.4")
 app.mount("/ui", StaticFiles(directory=os.path.join(REPO_ROOT, "ui")), name="ui")
+
 
 @app.get("/", response_class=HTMLResponse)
 def index():
     with open(os.path.join(REPO_ROOT, "ui", "index.html"), "r", encoding="utf-8") as f:
         return f.read()
 
+
 class KeyReq(BaseModel):
     api_key: str
+
 
 class ChatReq(BaseModel):
     message: str
 
+
 class ApproveReq(BaseModel):
     proposal_id: str
+
 
 @app.post("/api/settings/openai_key")
 def save_key(req: KeyReq):
@@ -39,14 +49,24 @@ def save_key(req: KeyReq):
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
+
 @app.get("/api/state")
 def state():
     return {
         "agents": load_agents(REPO_ROOT),
-        "skills": load_skills_state(REPO_ROOT),
+        "skills": load_skills_state(str(WORKSPACE.generated_skills)),
         "proposals": memory.list_proposals(),
-        "configs": {"m365_configured": bool(memory.get_json("m365.config"))}
+        "configs": {"m365_configured": bool(memory.get_json("m365.config")), "workspace": str(WORKSPACE.base)},
     }
+
+
+@app.get("/api/logs")
+def logs():
+    log_file = WORKSPACE.logs / "agent-platform.log"
+    if not log_file.exists():
+        return {"ok": True, "content": ""}
+    return {"ok": True, "content": log_file.read_text(encoding="utf-8")[-20000:]}
+
 
 @app.post("/api/chat")
 def chat(req: ChatReq):
@@ -55,6 +75,7 @@ def chat(req: ChatReq):
     except Exception as e:
         return JSONResponse(status_code=200, content={"reply": f"❌ Error: {e}"})
 
+
 @app.post("/api/proposals/approve")
 def approve(req: ApproveReq):
     try:
@@ -62,6 +83,8 @@ def approve(req: ApproveReq):
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
+
 if __name__ == "__main__":
     import uvicorn
+
     uvicorn.run("app.main:app", host="127.0.0.1", port=APP_PORT, reload=False)
