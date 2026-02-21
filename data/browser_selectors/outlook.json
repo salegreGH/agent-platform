@@ -1,32 +1,44 @@
 {
-  "version": 1,
+  "version": 2,
   "inbox_ready": [
     "aria-label=Inbox",
     "role=main",
     "div[data-app-section='message-list']",
-    "div[aria-label*='Inbox']"
+    "div[aria-label*='Inbox']",
+    "text=Inbox"
   ],
   "message_item": [
     "div[role='row']",
     "div[data-convid]",
-    "article[role='listitem']"
+    "article[role='listitem']",
+    "div[aria-label*='Message list'] [role='row']"
+  ],
+  "popup_close": [
+    "button[aria-label='Close']",
+    "button[title='Close']",
+    "button:has-text('Got it')",
+    "button:has-text('Dismiss')"
   ],
   "field_patterns": {
     "subject": [
       "data-field=[\"']subject[\"']>([^<]+)<",
-      "aria-label=[\"']Subject[\"'][^>]*>([^<]+)<"
+      "aria-label=[\"']Subject[\"'][^>]*>([^<]+)<",
+      "data-testid=[\"']message-subject[\"'][^>]*>([^<]+)<"
     ],
     "from": [
       "data-field=[\"']from[\"']>([^<]+)<",
-      "aria-label=[\"']From[\"'][^>]*>([^<]+)<"
+      "aria-label=[\"']From[\"'][^>]*>([^<]+)<",
+      "data-testid=[\"']message-from[\"'][^>]*>([^<]+)<"
     ],
     "received_at": [
       "data-field=[\"']received[\"']>([^<]+)<",
-      "aria-label=[\"']Received[\"'][^>]*>([^<]+)<"
+      "aria-label=[\"']Received[\"'][^>]*>([^<]+)<",
+      "datetime=[\"']([^\"']+)[\"']"
     ],
     "preview": [
       "data-field=[\"']preview[\"']>([^<]+)<",
-      "class=[\"'][^\"']*preview[^\"']*[\"'][^>]*>([^<]+)<"
+      "class=[\"'][^\"']*preview[^\"']*[\"'][^>]*>([^<]+)<",
+      "data-testid=[\"']message-preview[\"'][^>]*>([^<]+)<"
     ]
   }
 }

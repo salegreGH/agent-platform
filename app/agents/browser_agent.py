@@ -78,6 +78,51 @@ class BrowserAgent:
         self.memory.upsert_browser_session(session.session_id, session.model_dump(mode="json"))
         return session
 
+    def validate_outlook_ready(self, session_id: str, *, html: str | None = None, current_url: str | None = None) -> Dict[str, Any]:
+        session = self.get_session(session_id)
+        source = (html or "").lower()
+        url = (current_url or session.current_url or "").lower()
+        inbox_url = "outlook.office.com/mail"
+
+        missing: list[str] = []
+        if inbox_url not in url:
+            missing.append("not_in_inbox")
+        if any(k in source for k in ["select an account", "elige una cuenta", "pick an account"]):
+            missing.append("account_picker")
+        if any(k in source for k in ["consent", "permissions requested", "accept"]):
+            missing.append("consent")
+        has_message_signals = all(k in source for k in ["data-field='from'", "data-field='subject'", "data-field='received'"]) or all(
+            k in source for k in ["data-field=\"from\"", "data-field=\"subject\"", "data-field=\"received\""]
+        )
+        if "inbox" not in source and "bandeja" not in source and not has_message_signals:
+            missing.append("inbox_not_visible")
+
+        ready = len(missing) == 0
+        if ready:
+            session.login_detected = True
+            session.status = "ready"
+            session.pause_reason = None
+            session.last_error_code = None
+        else:
+            session.login_detected = False
+            session.status = "paused_login"
+            session.last_error_code = "NOT_READY"
+        session.updated_at = datetime.now(timezone.utc)
+        session.last_action_log.append({"action": "validate_ready", "ready": ready, "missing": missing, "ts": session.updated_at.isoformat()})
+        self.memory.upsert_browser_session(session.session_id, session.model_dump(mode="json"))
+        return {"ready": ready, "missing": missing, "session_id": session.session_id, "current_url": session.current_url}
+
+    def apply_recovery_strategy(self, session_id: str, strategy: str) -> Dict[str, Any]:
+        session = self.get_session(session_id)
+        ts = datetime.now(timezone.utc).isoformat()
+        action = {"strategy": strategy, "ts": ts}
+        if strategy == "navigate_to_inbox":
+            session.current_url = "https://outlook.office.com/mail/"
+        session.last_action_log.append({"action": "recovery", **action})
+        session.trace.append({"event": "recovery_strategy", **action})
+        self.memory.upsert_browser_session(session.session_id, session.model_dump(mode="json"))
+        return {"ok": True, "strategy": strategy}
+
     def resume(self, session_id: str) -> BrowserSession:
         session = self.get_session(session_id)
         if session.status != "paused_login":
@@ -132,18 +177,27 @@ class BrowserAgent:
         field_patterns = selectors_cfg.get("field_patterns", {})
         inbox_hint = bool(re.search(r"inbox|bandeja", source, re.IGNORECASE))
         iframe_hint = "<iframe" in source.lower()
+        popup_hint = bool(re.search(r"consent|tips|try the new outlook|got it", source, re.IGNORECASE))
+        not_in_inbox = not bool(re.search(r"outlook\.office\.com/mail|inbox|bandeja", (session.current_url or "") + source, re.IGNORECASE))
         data = {
             "subject": self._extract_with_patterns(source, field_patterns.get("subject", [])),
             "from": self._extract_with_patterns(source, field_patterns.get("from", [])),
             "received": self._extract_with_patterns(source, field_patterns.get("received", field_patterns.get("received_at", []))),
             "preview": self._extract_with_patterns(source, field_patterns.get("preview", [])),
-            "url": session.current_url,
+            "message_url": session.current_url,
 
         }
 
         if not all([data["subject"], data["from"], data["received"], data["preview"]]):
             session.status = "error"
-            session.last_error_code = "IFRAME_ISSUE" if iframe_hint else "SELECTOR_BROKE"
+            if popup_hint:
+                session.last_error_code = "POPUP_BLOCKING"
+            elif not_in_inbox:
+                session.last_error_code = "NOT_IN_INBOX"
+            elif iframe_hint:
+                session.last_error_code = "IFRAME_ISSUE"
+            else:
+                session.last_error_code = "SELECTOR_BROKE"
             snippet = re.sub(r"\s+", " ", source)[:400]
             artifacts = self._save_failure_artifacts(session, source)
             session.trace.append({"event": "extract_failed", "snippet": snippet, **artifacts})
@@ -154,11 +208,13 @@ class BrowserAgent:
                 "message": "No se pudo localizar el email más reciente.",
                 "html_snippet": snippet,
                 "selectors_tried": field_patterns,
-                "dom_hints": {"has_inbox_keyword": inbox_hint, "has_iframe": iframe_hint, "source_len": len(source)},
+                "dom_hints": {"has_inbox_keyword": inbox_hint, "has_iframe": iframe_hint, "has_popup": popup_hint, "source_len": len(source)},
                 "current_url": session.current_url,
+                "action_log": session.last_action_log[-20:],
                 **artifacts,
             }
 
+        data["received_iso"] = data["received"]
         data["received_at"] = data["received"]
         session.status = "ready"
         session.trace.append({"event": "extract_ok", "email": data})

@@ -44,7 +44,26 @@ class RecoveryManager:
         }
         return bundle
 
-    def retry(self, run: Dict[str, Any], failure_result: Dict[str, Any], session: Dict[str, Any] | None, retry_callback: Callable[[], Dict[str, Any]]) -> Dict[str, Any]:
+    def _strategy_for(self, classification: str, attempt: int) -> str:
+        options = {
+            "POPUP_BLOCKING": ["close_popups", "navigate_to_inbox", "timing_backoff"],
+            "NOT_IN_INBOX": ["navigate_to_inbox", "close_popups", "timing_backoff"],
+            "TIMING": ["timing_backoff", "navigate_to_inbox", "close_popups"],
+            "IFRAME_ISSUE": ["handle_iframe", "navigate_to_inbox", "timing_backoff"],
+            "SELECTOR_BROKE": ["selector_safe_patch", "timing_backoff", "navigate_to_inbox"],
+        }
+        sequence = options.get(classification, ["timing_backoff", "navigate_to_inbox", "close_popups"])
+        idx = max(0, min(attempt - 1, len(sequence) - 1))
+        return sequence[idx]
+
+    def retry(
+        self,
+        run: Dict[str, Any],
+        failure_result: Dict[str, Any],
+        session: Dict[str, Any] | None,
+        retry_callback: Callable[[str], Dict[str, Any]],
+        strategy_callback: Callable[[str], Dict[str, Any]] | None = None,
+    ) -> Dict[str, Any]:
         triage = run.get("metadata", {}).get("triage", {})
         classification = triage.get("classification") or failure_result.get("error_code") or "BUG_CORE"
         fingerprint = f"{run.get('run_id')}:{run.get('metadata', {}).get('task_state')}:{classification}"
@@ -59,6 +78,11 @@ class RecoveryManager:
             timeline.append("Excedí el máximo de auto-recuperaciones. Necesito una acción puntual: confirma que estás en Inbox y pulsa Continuar.")
             return {"status": "needs_user", "timeline": timeline, "evidence": evidence_bundle, "attempts": attempts}
 
+        strategy = self._strategy_for(classification, attempts)
+        timeline.append(f"Estoy probando estrategia de recuperación: {strategy}.")
+        if strategy_callback:
+            strategy_callback(strategy)
+
         failure_event = {
             "run_id": run.get("run_id"),
             "step_id": run.get("metadata", {}).get("task_state"),
@@ -66,15 +90,16 @@ class RecoveryManager:
             "error": failure_result.get("message"),
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
-        patch_bundle = self.bugfix_agent.run(failure_event, evidence_bundle)
-        if patch_bundle.get("safe_patch") and self.auto_apply_safe_patch:
-            timeline.append("Detecté que cambió el selector, apliqué un safe fix automáticamente.")
-        elif patch_bundle.get("patch"):
-            timeline.append("Generé un fix que requiere aprobación.")
-            return {"status": "proposal_required", "timeline": timeline, "evidence": evidence_bundle, "patch": patch_bundle}
+        if strategy == "selector_safe_patch":
+            patch_bundle = self.bugfix_agent.run(failure_event, evidence_bundle)
+            if patch_bundle.get("safe_patch") and self.auto_apply_safe_patch:
+                timeline.append("Detecté que cambió el selector, apliqué un safe fix automáticamente.")
+            elif patch_bundle.get("patch"):
+                timeline.append("Generé un fix que requiere aprobación.")
+                return {"status": "proposal_required", "timeline": timeline, "evidence": evidence_bundle, "patch": patch_bundle}
 
         timeline.append("Reintenté extracción con la nueva estrategia.")
-        retry_result = retry_callback()
+        retry_result = retry_callback(strategy)
         return {
             "status": "recovered" if retry_result.get("status") == "ok" else "failed",
             "timeline": timeline,
