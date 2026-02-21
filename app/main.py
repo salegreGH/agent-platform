@@ -9,6 +9,7 @@ from pydantic import BaseModel
 
 from .agents.browser_agent import BrowserAgent
 from .agents.m365_email_agent import M365EmailAgent
+from .agents.bugfix_agent import BugFixAgent
 from .core.logging import configure_logging
 from .core.paths import WorkspacePaths
 from .memory import Memory
@@ -20,6 +21,7 @@ from .platform.registry import AgentRegistry, ToolRegistry
 from .platform.contracts import AgentContract
 from .platform.models import ConnectorConfig
 from .state import load_skills_state
+from .recovery.recovery_manager import RecoveryManager
 from .tools.secrets import set_secret
 
 APP_PORT = int(os.getenv("AGENT_PLATFORM_PORT", "8787"))
@@ -52,8 +54,11 @@ agent_registry.register(AgentContract(id="browser", name="BrowserAgent", purpose
 policy_engine = PolicyEngine(allowed_write_roots=[WORKSPACE.root, WORKSPACE.workspace])
 security_agent = SecurityPolicyAgent(policy_engine)
 
-browser_agent = BrowserAgent(memory, artifacts_dir=WORKSPACE.artifacts)
-core_runtime = CoreRuntimeService(memory, m365, tool_registry, browser_agent=browser_agent)
+selectors_path = Path(REPO_ROOT) / "data" / "browser_selectors" / "outlook.json"
+bugfix_agent = BugFixAgent(selectors_path=selectors_path)
+recovery_manager = RecoveryManager(memory, workspace_dir=WORKSPACE.workspace, bugfix_agent=bugfix_agent)
+browser_agent = BrowserAgent(memory, artifacts_dir=WORKSPACE.artifacts, selectors_path=selectors_path)
+core_runtime = CoreRuntimeService(memory, m365, tool_registry, browser_agent=browser_agent, recovery_manager=recovery_manager)
 evolver = EvolverService(memory, WORKSPACE)
 orch = Orchestrator(memory, repo_root=REPO_ROOT, core_runtime=core_runtime, evolver=evolver, security=security_agent)
 
@@ -204,6 +209,11 @@ def core_mark_login_done(run_id: str):
 @app.get("/core/run/{run_id}/state")
 def core_run_state(run_id: str):
     return core_runtime.get_run_state(run_id)
+
+
+@app.post("/core/run/{run_id}/retry")
+def core_run_retry(run_id: str):
+    return core_runtime.retry_run(run_id)
 
 
 @app.post("/core/browser/{session_id}/pause_login")

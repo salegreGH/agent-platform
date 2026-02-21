@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import timezone, datetime
 from pathlib import Path
+import json
 import re
 from typing import Any, Dict
 from uuid import uuid4
@@ -11,19 +12,35 @@ from ..platform.models import BrowserAction, BrowserSession
 
 
 class BrowserAgent:
-    def __init__(self, memory: Memory, artifacts_dir: Path):
+    def __init__(self, memory: Memory, artifacts_dir: Path, selectors_path: Path | None = None):
         self.memory = memory
         self.artifacts_dir = artifacts_dir
         self.artifacts_dir.mkdir(parents=True, exist_ok=True)
+        self.selectors_path = selectors_path
+
+    def _load_outlook_selectors(self) -> Dict[str, Any]:
+        if self.selectors_path and self.selectors_path.exists():
+            return json.loads(self.selectors_path.read_text(encoding="utf-8"))
+        return {
+            "inbox_ready": ["aria-label=Inbox", "role=main", "div[data-app-section='message-list']"],
+            "message_item": ["div[role='row']", "div[data-convid]", "article[role='listitem']"],
+            "field_patterns": {
+                "subject": [r'data-field=["\']subject["\']>([^<]+)<', r'aria-label=["\']Subject["\'][^>]*>([^<]+)<'],
+                "from": [r'data-field=["\']from["\']>([^<]+)<', r'aria-label=["\']From["\'][^>]*>([^<]+)<'],
+                "received_at": [r'data-field=["\']received["\']>([^<]+)<', r'aria-label=["\']Received["\'][^>]*>([^<]+)<'],
+                "preview": [r'data-field=["\']preview["\']>([^<]+)<', r'class=["\'][^"\']*preview[^"\']*["\'][^>]*>([^<]+)<'],
+            },
+        }
 
     def start_session(self, start_url: str | None = None) -> BrowserSession:
+        selectors_cfg = self._load_outlook_selectors()
         session = BrowserSession(
             session_id=f"browser-{uuid4().hex[:10]}",
             current_url=start_url,
             status="open",
             selectors={
-                "inbox_ready": ["aria-label=Inbox", "role=main", "div[data-app-section='message-list']"],
-                "message_item": ["div[role='row']", "div[data-convid]", "article[role='listitem']"],
+                "inbox_ready": selectors_cfg.get("inbox_ready", []),
+                "message_item": selectors_cfg.get("message_item", []),
             },
         )
         self.memory.upsert_browser_session(session.session_id, session.model_dump(mode="json"))
@@ -96,11 +113,13 @@ class BrowserAgent:
                 "message": "No browser worker content available for extraction.",
             }
 
+        selectors_cfg = self._load_outlook_selectors()
+        field_patterns = selectors_cfg.get("field_patterns", {})
         data = {
-            "subject": self._extract_with_patterns(source, [r'data-field=["\']subject["\']>([^<]+)<', r'aria-label=["\']Subject["\'][^>]*>([^<]+)<']),
-            "from": self._extract_with_patterns(source, [r'data-field=["\']from["\']>([^<]+)<', r'aria-label=["\']From["\'][^>]*>([^<]+)<']),
-            "received_at": self._extract_with_patterns(source, [r'data-field=["\']received["\']>([^<]+)<', r'aria-label=["\']Received["\'][^>]*>([^<]+)<']),
-            "preview": self._extract_with_patterns(source, [r'data-field=["\']preview["\']>([^<]+)<', r'class=["\'][^"\']*preview[^"\']*["\'][^>]*>([^<]+)<']),
+            "subject": self._extract_with_patterns(source, field_patterns.get("subject", [])),
+            "from": self._extract_with_patterns(source, field_patterns.get("from", [])),
+            "received_at": self._extract_with_patterns(source, field_patterns.get("received_at", [])),
+            "preview": self._extract_with_patterns(source, field_patterns.get("preview", [])),
         }
 
         if not all(data.values()):
@@ -114,6 +133,9 @@ class BrowserAgent:
                 "error_code": "SELECTOR_BROKE",
                 "message": "No se pudo localizar el email más reciente con los selectores actuales.",
                 "html_snippet": snippet,
+                "selectors_tried": field_patterns,
+                "dom_hints": {"has_inbox_keyword": "inbox" in source.lower(), "source_len": len(source)},
+                "current_url": session.current_url,
             }
 
         session.status = "ready"

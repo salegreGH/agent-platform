@@ -28,11 +28,12 @@ class CoreRuntimeService:
         "FAILED",
     }
 
-    def __init__(self, memory: Memory, m365_agent: M365EmailAgent, tool_registry: ToolRegistry, browser_agent: BrowserAgent | None = None):
+    def __init__(self, memory: Memory, m365_agent: M365EmailAgent, tool_registry: ToolRegistry, browser_agent: BrowserAgent | None = None, recovery_manager=None):
         self.memory = memory
         self.m365_agent = m365_agent
         self.tool_registry = tool_registry
         self.browser_agent = browser_agent
+        self.recovery_manager = recovery_manager
         self.planner = TaskPlanner()
         self.loop_guard = AntiLoopGuard(memory)
 
@@ -147,6 +148,14 @@ class CoreRuntimeService:
             "actions": ctas,
         }
 
+    def _get_session_payload(self, session_id: str | None) -> Dict[str, Any] | None:
+        if not session_id:
+            return None
+        try:
+            return self.browser_agent.get_session(session_id).model_dump(mode="json") if self.browser_agent else None
+        except Exception:
+            return None
+
     def _ensure_browser_flow(self, run: Run, user_text: str) -> Dict[str, Any]:
         run.metadata["task_state"] = "BROWSER_START"
         run.metadata["strategy"] = "browser"
@@ -209,16 +218,14 @@ class CoreRuntimeService:
             )
             return {"reply": reply, "run": extraction["run"], "result": extraction["result"], "wizard": {"show": True, "state": "DONE", "session_id": session_id, "status_text": "Hecho"}}
 
+        recovery = self.retry_run(run.run_id)
+        if recovery.get("status") == "ok":
+            return recovery
         return {
-            **self._human_reply(
-                run.metadata.get("locale", "es"),
-                "Ya completaste el login en Outlook Web.",
-                "Intenté extraer el email pero encontré un error clasificado.",
-                "Revisa el diagnóstico y vuelve a intentar tras aplicar fix de selectores.",
-                [{"id": "retry", "label": "Reintentar", "kind": "retry"}],
-            ),
-            "run": extraction["run"],
-            "result": extraction.get("result"),
+            "reply": "\n".join(recovery.get("timeline", ["No pude recuperar automáticamente."])),
+            "actions": [{"id": "retry", "label": "Reintentar", "kind": "retry"}],
+            "run": recovery.get("run") or extraction["run"],
+            "result": recovery.get("result") or extraction.get("result"),
             "wizard": {"show": True, "state": "ERROR", "session_id": session_id, "status_text": "Error clasificado"},
         }
 
@@ -259,6 +266,48 @@ class CoreRuntimeService:
         self._save_run(run)
         self._set_active_run(None)
         return {"status": "error", "run": run.model_dump(mode="json"), "result": result}
+
+    def retry_run(self, run_id: str) -> Dict[str, Any]:
+        payload = self.memory.get_run(run_id)
+        if not payload:
+            return {"ok": False, "error": "run_not_found"}
+        run = Run.model_validate(payload)
+        session_id = run.metadata.get("browser_session_id")
+        if not session_id:
+            return {"ok": False, "error": "browser_session_not_found"}
+        if not self.recovery_manager:
+            result = self._run_browser_extract_step(run, session_id)
+            return {"status": "ok" if result.get("status") == "ok" else "error", "run": result.get("run"), "result": result.get("result")}
+
+        failure_result = (run.metadata.get("triage") or {}).get("raw") or {}
+        recovery = self.recovery_manager.retry(
+            run=run.model_dump(mode="json"),
+            failure_result=failure_result,
+            session=self._get_session_payload(session_id),
+            retry_callback=lambda: self._run_browser_extract_step(run, session_id),
+        )
+        updated_payload = self.memory.get_run(run_id)
+        updated_run = Run.model_validate(updated_payload) if updated_payload else run
+        updated_run.metadata["recovery"] = {
+            "timeline": recovery.get("timeline", []),
+            "evidence": recovery.get("evidence", {}),
+            "attempts": recovery.get("attempts", 0),
+            "status": recovery.get("status"),
+        }
+        self._save_run(updated_run)
+        if recovery.get("status") == "recovered":
+            return {
+                "status": "ok",
+                "reply": "\n".join(recovery.get("timeline", []) + ["Reintento completado: extracción recuperada."]),
+                "run": updated_run.model_dump(mode="json"),
+                "result": updated_run.metadata.get("result"),
+            }
+        return {
+            "status": "error",
+            "timeline": recovery.get("timeline", []),
+            "run": updated_run.model_dump(mode="json"),
+            "result": failure_result,
+        }
 
     def get_run_state(self, run_id: str) -> Dict[str, Any]:
         payload = self.memory.get_run(run_id)
