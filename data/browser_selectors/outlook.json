@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "inbox_ready": [
+    "aria-label=Inbox",
+    "role=main",
+    "div[data-app-section='message-list']",
+    "div[aria-label*='Inbox']"
+  ],
+  "message_item": [
+    "div[role='row']",
+    "div[data-convid]",
+    "article[role='listitem']"
+  ],
+  "field_patterns": {
+    "subject": [
+      "data-field=[\"']subject[\"']>([^<]+)<",
+      "aria-label=[\"']Subject[\"'][^>]*>([^<]+)<"
+    ],
+    "from": [
+      "data-field=[\"']from[\"']>([^<]+)<",
+      "aria-label=[\"']From[\"'][^>]*>([^<]+)<"
+    ],
+    "received_at": [
+      "data-field=[\"']received[\"']>([^<]+)<",
+      "aria-label=[\"']Received[\"'][^>]*>([^<]+)<"
+    ],
+    "preview": [
+      "data-field=[\"']preview[\"']>([^<]+)<",
+      "class=[\"'][^\"']*preview[^\"']*[\"'][^>]*>([^<]+)<"
+    ]
+  }
+}

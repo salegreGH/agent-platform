@@ -38,6 +38,17 @@ function App(){
       setMsg('no es viable');
       return;
     }
+    if(action.kind === 'retry'){
+      const rid = runId || wizard?.run_id;
+      if(!rid) return;
+      setChat(c=>[...c,{role:'assistant',content:'Estoy analizando el error y relanzando recuperación automática...'}]);
+      const r = await fetch(`/core/run/${rid}/retry`,{method:'POST'});
+      const j = await r.json();
+      if(j.reply) setChat(c=>[...c,{role:'assistant',content:j.reply,actions:j.actions||[],run:j.run}]);
+      if(j.timeline) setChat(c=>[...c,{role:'assistant',content:j.timeline.join('\n')}]);
+      await refreshState();
+      return;
+    }
     if(action.kind === 'open_device_login' && action.url){
       window.open(action.url, '_blank');
     }
