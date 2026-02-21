@@ -15,3 +15,6 @@ powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1
 ```
 
 UI: http://127.0.0.1:8787
+
+## Estratègia i full de ruta
+- Visió autoevolutiva i arquitectura proposada: `docs/vision_autoevolution.md`
