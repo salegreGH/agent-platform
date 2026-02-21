@@ -51,8 +51,38 @@ def test_orchestrator_switches_to_fallback_after_repeated_auth_block(tmp_path: P
     assert "Necessito autorització" in first["reply"]
 
     second = orch.run("dame mi ultimo email de outlook")
-    assert "canvio d'estratègia" in second["reply"]
+    assert "Canvio de via" in second["reply"]
     fallback = second["cards"][1]["fallback"]
+    assert fallback["strategy"] == "browser_outlook"
+
+    sessions = memory.list_browser_sessions()
+    assert len(sessions) == 1
+    assert sessions[0]["status"] == "paused"
+
+
+def test_orchestrator_switches_to_fallback_if_user_marks_path_unviable(tmp_path: Path):
+    paths = build_paths(tmp_path)
+    paths.ensure_exists()
+    memory = Memory(str(paths.memory_db))
+
+    m365 = M365EmailAgent(memory, cache_dir=str(paths.msal_cache))
+    m365.set_config({"tenant_id": "common", "client_id": "test-client-id"})
+    m365._acquire_token = lambda: {
+        "ok": False,
+        "error": "needs_device_code",
+        "message": "Go to https://microsoft.com/devicelogin and enter code DEF456",
+    }
+
+    browser = BrowserAgent(memory, artifacts_dir=paths.artifacts)
+    runtime = CoreRuntimeService(memory, m365, ToolRegistry(), browser_agent=browser)
+    evolver = EvolverService(memory, paths)
+    security = SecurityPolicyAgent(PolicyEngine(allowed_write_roots=[paths.root, paths.workspace]))
+    orch = Orchestrator(memory, str(tmp_path), runtime, evolver, security)
+
+    response = orch.run("esta via no es viable, busca alternativa para conectar al email")
+    assert "Canvio de via" in response["reply"]
+    assert "no és viable" in response["reply"]
+    fallback = response["cards"][1]["fallback"]
     assert fallback["strategy"] == "browser_outlook"
 
     sessions = memory.list_browser_sessions()
