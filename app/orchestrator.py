@@ -195,6 +195,21 @@ class Orchestrator:
         pairs = re.findall(r"([a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*([^\s]+)", text)
         return {k.strip(): v.strip() for k, v in pairs}
 
+    def _normalize_rel_path(self, path_value: str | None) -> str:
+        if not path_value:
+            return ""
+
+        normalized = str(path_value).strip().replace("\\", "/")
+        data_idx = normalized.lower().find("data/")
+        if data_idx >= 0:
+            normalized = normalized[data_idx:]
+        else:
+            drive_match = re.match(r"^[a-zA-Z]:/", normalized)
+            if drive_match:
+                normalized = normalized[3:]
+
+        return normalized.lstrip("/")
+
     # -----------------------------------------------------------
     # APPLY PROPOSAL
     # -----------------------------------------------------------
@@ -214,18 +229,21 @@ class Orchestrator:
         tool_stub = bundle.get("tool_stub") or ""
 
         # Write skill
-        abs_skill = os.path.join(self.repo_root, proposal["file_path"])
+        skill_rel = self._normalize_rel_path(proposal.get("file_path"))
+        abs_skill = os.path.join(self.repo_root, skill_rel)
         os.makedirs(os.path.dirname(abs_skill), exist_ok=True)
 
         with open(abs_skill, "w", encoding="utf-8") as f:
             yaml.safe_dump(skill, f, sort_keys=False, allow_unicode=True)
 
         # Write tool
-        tool_rel = skill.get("tool_path")
+        tool_rel = self._normalize_rel_path(skill.get("tool_path"))
 
         if tool_rel:
             abs_tool = os.path.join(self.repo_root, tool_rel)
-            os.makedirs(os.path.dirname(abs_tool), exist_ok=True)
+            tool_dir = os.path.dirname(abs_tool)
+            if tool_dir:
+                os.makedirs(tool_dir, exist_ok=True)
 
             with open(abs_tool, "w", encoding="utf-8") as f:
                 f.write(tool_stub + "\n")

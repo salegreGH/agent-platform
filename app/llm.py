@@ -86,7 +86,7 @@ def propose_skill(user_text: str, repo_root: str, runtime_context: dict | None =
             r = client.responses.create(
                 model=model,
                 input=[
-                    {"role":"system","content":"Ets l'arquitecte de la plataforma d'agents. Dona sempre resposta d'usuari en llenguatge natural (no JSON visible) i defineix una única evolució executable pel coordinador local. Si és Outlook posa requires ['m365_email']. Action ha de ser python_snake_case. tool_file és un nom .py i tool_stub ha de contenir execute(ctx)->dict. Evita placeholders inútils i intenta aprofitar el codi existent."},
+                    {"role":"system","content":"Ets l'arquitecte de la plataforma d'agents. Dona resposta en llenguatge natural i defineix UNA proposta única per la tasca completa (no una proposta per cada pas). La proposta ha d'explicar a l'agent local què ha d'implementar i com s'executa després la tasca amb programari local. Prioritza sempre reutilitzar agents/software locals existents abans d'invocar directament el LLM. Si cal nova capacitat, proposa-la dins la mateixa evolució completa. Si és Outlook posa requires ['m365_email']. Action ha de ser python_snake_case. tool_file ha de ser només nom relatiu .py (sense rutes absolutes) i tool_stub ha de contenir execute(ctx)->dict."},
                     {"role":"system","content":f"Context d'execució actual:\n{context_dump}"},
                     {"role":"system","content":f"Snapshot del repositori:\n{repo_dump}"},
                     {"role":"user","content": user_text}
