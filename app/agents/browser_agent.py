@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import timezone, datetime
 from pathlib import Path
+import re
 from typing import Any, Dict
 from uuid import uuid4
 
@@ -16,7 +17,15 @@ class BrowserAgent:
         self.artifacts_dir.mkdir(parents=True, exist_ok=True)
 
     def start_session(self, start_url: str | None = None) -> BrowserSession:
-        session = BrowserSession(session_id=f"browser-{uuid4().hex[:10]}", current_url=start_url)
+        session = BrowserSession(
+            session_id=f"browser-{uuid4().hex[:10]}",
+            current_url=start_url,
+            status="open",
+            selectors={
+                "inbox_ready": ["aria-label=Inbox", "role=main", "div[data-app-section='message-list']"],
+                "message_item": ["div[role='row']", "div[data-convid]", "article[role='listitem']"],
+            },
+        )
         self.memory.upsert_browser_session(session.session_id, session.model_dump(mode="json"))
         return session
 
@@ -28,37 +37,93 @@ class BrowserAgent:
 
     def pause_for_user_login(self, session_id: str, reason: str = "Login o 2FA requerit") -> BrowserSession:
         session = self.get_session(session_id)
-        session.status = "paused"
+        session.status = "paused_login"
         session.pause_reason = reason
         session.updated_at = datetime.now(timezone.utc)
         session.trace.append({"event": "pause", "reason": reason})
+        session.last_action_log.append({"action": "pause_for_login", "reason": reason, "ts": session.updated_at.isoformat()})
         self.memory.upsert_browser_session(session.session_id, session.model_dump(mode="json"))
         return session
 
     def mark_login_done(self, session_id: str) -> BrowserSession:
         session = self.get_session(session_id)
         session.login_detected = True
-        session.status = "running"
+        session.status = "ready"
         session.pause_reason = None
         session.updated_at = datetime.now(timezone.utc)
         session.trace.append({"event": "login_detected", "signal": "inbox_visible"})
+        session.last_action_log.append({"action": "mark_login_done", "ts": session.updated_at.isoformat()})
         self.memory.upsert_browser_session(session.session_id, session.model_dump(mode="json"))
         return session
 
     def resume(self, session_id: str) -> BrowserSession:
         session = self.get_session(session_id)
-        if session.status != "paused":
+        if session.status != "paused_login":
             raise ValueError("Session is not paused")
-        session.status = "running"
+        session.status = "ready"
         session.pause_reason = None
         session.updated_at = datetime.now(timezone.utc)
         session.trace.append({"event": "resume"})
+        session.last_action_log.append({"action": "resume", "ts": session.updated_at.isoformat()})
         self.memory.upsert_browser_session(session.session_id, session.model_dump(mode="json"))
         return session
 
+    @staticmethod
+    def _extract_with_patterns(html: str, patterns: list[str]) -> str | None:
+        for pattern in patterns:
+            m = re.search(pattern, html, re.IGNORECASE | re.DOTALL)
+            if m:
+                return re.sub(r"\s+", " ", m.group(1)).strip()
+        return None
+
+    def extract_last_email(self, session_id: str, *, html: str | None = None) -> Dict[str, Any]:
+        session = self.get_session(session_id)
+        if session.status == "paused_login":
+            return {"status": "blocked", "error_code": "AUTH_REQUIRED", "message": "Login/2FA pendiente."}
+
+        source = html or ""
+        session.status = "running"
+        session.updated_at = datetime.now(timezone.utc)
+        session.last_action_log.append({"action": "extract_last_email", "ts": session.updated_at.isoformat()})
+
+        if not source:
+            session.status = "error"
+            session.last_error_code = "MISSING_CAPABILITY"
+            self.memory.upsert_browser_session(session.session_id, session.model_dump(mode="json"))
+            return {
+                "status": "error",
+                "error_code": "MISSING_CAPABILITY",
+                "message": "No browser worker content available for extraction.",
+            }
+
+        data = {
+            "subject": self._extract_with_patterns(source, [r'data-field=["\']subject["\']>([^<]+)<', r'aria-label=["\']Subject["\'][^>]*>([^<]+)<']),
+            "from": self._extract_with_patterns(source, [r'data-field=["\']from["\']>([^<]+)<', r'aria-label=["\']From["\'][^>]*>([^<]+)<']),
+            "received_at": self._extract_with_patterns(source, [r'data-field=["\']received["\']>([^<]+)<', r'aria-label=["\']Received["\'][^>]*>([^<]+)<']),
+            "preview": self._extract_with_patterns(source, [r'data-field=["\']preview["\']>([^<]+)<', r'class=["\'][^"\']*preview[^"\']*["\'][^>]*>([^<]+)<']),
+        }
+
+        if not all(data.values()):
+            session.status = "error"
+            session.last_error_code = "SELECTOR_BROKE"
+            snippet = re.sub(r"\s+", " ", source)[:400]
+            session.trace.append({"event": "selector_broke", "snippet": snippet})
+            self.memory.upsert_browser_session(session.session_id, session.model_dump(mode="json"))
+            return {
+                "status": "error",
+                "error_code": "SELECTOR_BROKE",
+                "message": "No se pudo localizar el email más reciente con los selectores actuales.",
+                "html_snippet": snippet,
+            }
+
+        session.status = "ready"
+        session.trace.append({"event": "extract_ok", "email": data})
+        self.memory.upsert_browser_session(session.session_id, session.model_dump(mode="json"))
+        return {"status": "ok", "email": data}
+
     def execute_action(self, session_id: str, action: Dict[str, Any]) -> Dict[str, Any]:
         session = self.get_session(session_id)
-        if session.status == "paused":
+        if session.status == "paused_login":
             return {
                 "status": "paused",
                 "error_code": "BROWSER_SESSION_PAUSED",

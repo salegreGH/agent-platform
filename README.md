@@ -47,8 +47,10 @@ Això amplia la base prèvia (`kv`, `proposals`, `tasks`, `forms`, `loop_guard`)
 
 ### Worker Browser (MVP contract-first)
 - `app/agents/browser_agent.py`
-- Sessió/pause/resume implementats.
-- Si falta runtime Playwright, retorna error controlat `BROWSER_WORKER_UNAVAILABLE` + pla de resolució (no stub silenciós).
+- Sessió amb model `created|open|paused_login|ready|running|error` + logs d'accions.
+- Detecció de login i auto-advance a extracció en fer `mark_login_done`.
+- Extracció robusta `extract_last_email` amb selectors principals + fallback; classifica `SELECTOR_BROKE` amb snippet HTML.
+- Si falta runtime/browser content, retorna error classificat `MISSING_CAPABILITY`.
 
 ## 4) Milestones coberts en aquest increment
 
@@ -79,14 +81,16 @@ Inclou regressions per:
 - core runtime request form
 - models de domini i browser pause/resume amb errors controlats
 
-## 7) Demo: demanar l'últim email sense Graph
+## 7) Demo: demanar l'últim email sense Graph (auto-advance)
 
 1. A Chat escriu: `dame el último email de outlook`.
 2. Si Graph no és viable, escriu: `no es viable`.
 3. El sistema marca el run amb `graph_not_viable=true` i canvia automàticament a Browser Wizard (no torna a demanar device code en aquest run).
 4. Prem **Obrir navegador** i fes login/2FA a Outlook web.
-5. Torna al xat i prem **Ja he fet login** per reanudar.
-6. Consulta l'estat del run si cal:
+5. Torna al xat i prem **Ya hice login**.
+6. El runtime passa automàticament a `EXTRACTING -> VALIDATING -> DONE` (sense dependre del botó "Reintentar").
+7. Si falla per selectors, el run queda en `FAILED` amb triatge (`SELECTOR_BROKE`, `AUTH_REQUIRED`, `MISSING_CAPABILITY`) i diagnòstic.
+8. Consulta l'estat del run si cal:
    - `GET /core/run/{run_id}/state`
 
 Endpoints nous de suport:

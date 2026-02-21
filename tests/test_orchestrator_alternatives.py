@@ -60,7 +60,7 @@ def test_unviable_intent_blocks_device_code_loop(tmp_path: Path):
     assert second["run"]["metadata"]["flags"]["graph_not_viable"] is True
 
     third = orch.run("continua")
-    assert "mantengo Graph desactivado" in third["reply"]
+    assert "Intenté extraer el email" in third["reply"]
     assert "device code" not in third["reply"].lower()
 
     sessions = memory.list_browser_sessions()
@@ -68,12 +68,20 @@ def test_unviable_intent_blocks_device_code_loop(tmp_path: Path):
 
 
 def test_browser_waiting_then_done_login_flow(tmp_path: Path):
-    orch, _ = build_orchestrator(tmp_path)
+    orch, memory = build_orchestrator(tmp_path)
 
     response = orch.run("no es viable, hazlo por navegador")
     assert response["wizard"]["state"] == "BROWSER_WAITING_FOR_LOGIN"
     run_id = response["run"]["run_id"]
+    run = memory.get_run(run_id)
+    run["metadata"]["browser_inbox_html"] = """
+    <div data-field='from'>Alerts</div>
+    <div data-field='subject'>Build finished</div>
+    <div data-field='received'>2026-01-01 10:00</div>
+    <div data-field='preview'>Pipeline green</div>
+    """
+    memory.upsert_run(run_id, run["goal"], run["status"], run)
 
     done = orch.core_runtime.mark_login_done(run_id)
     assert done["wizard"]["state"] == "DONE"
-    assert "Siguiente paso" in done["reply"]
+    assert done["result"]["status"] == "ok"

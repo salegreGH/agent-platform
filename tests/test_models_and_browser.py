@@ -58,7 +58,7 @@ def test_browser_pause_resume_and_controlled_error(tmp_path: Path):
     session = browser.start_session("https://example.com")
 
     paused = browser.pause_for_user_login(session.session_id)
-    assert paused.status == "paused"
+    assert paused.status == "paused_login"
 
     blocked = browser.execute_action(session.session_id, {"action": "click", "selector": "button"})
     assert blocked["status"] == "paused"
@@ -72,3 +72,27 @@ def test_browser_pause_resume_and_controlled_error(tmp_path: Path):
     snap = browser.execute_action(session.session_id, {"action": "screenshot"})
     assert snap["status"] == "ok"
     assert Path(snap["artifact"]).exists()
+
+
+def test_browser_extract_last_email_success_and_selector_fallback(tmp_path: Path):
+    paths = build_paths(tmp_path)
+    paths.ensure_exists()
+    memory = Memory(str(paths.memory_db))
+    browser = BrowserAgent(memory, artifacts_dir=paths.artifacts)
+    session = browser.start_session("https://outlook.office.com/mail/")
+    browser.mark_login_done(session.session_id)
+
+    html = """
+    <section>
+      <span data-field='from'>Operations Team</span>
+      <span data-field='subject'>Weekly report</span>
+      <span data-field='received'>2026-02-01 08:40</span>
+      <span data-field='preview'>First line preview</span>
+    </section>
+    """
+    extracted = browser.extract_last_email(session.session_id, html=html)
+    assert extracted["status"] == "ok"
+    assert extracted["email"]["subject"] == "Weekly report"
+
+    broken = browser.extract_last_email(session.session_id, html="<div>no inbox</div>")
+    assert broken["error_code"] == "SELECTOR_BROKE"

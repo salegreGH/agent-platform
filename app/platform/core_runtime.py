@@ -16,12 +16,14 @@ class CoreRuntimeService:
     RUN_STATES = {
         "INIT",
         "CHOOSE_STRATEGY",
-        "NEED_AUTH_GRAPH",
+        "GRAPH_AUTH",
         "GRAPH_NOT_VIABLE",
-        "START_BROWSER_SESSION",
-        "BROWSER_WAITING_FOR_LOGIN",
+        "BROWSER_START",
+        "WAITING_HUMAN_LOGIN",
         "BROWSER_READY",
-        "RUNNING",
+        "EXTRACTING",
+        "VALIDATING",
+        "RETRYING",
         "DONE",
         "FAILED",
     }
@@ -146,7 +148,7 @@ class CoreRuntimeService:
         }
 
     def _ensure_browser_flow(self, run: Run, user_text: str) -> Dict[str, Any]:
-        run.metadata["task_state"] = "START_BROWSER_SESSION"
+        run.metadata["task_state"] = "BROWSER_START"
         run.metadata["strategy"] = "browser"
         run.metadata.setdefault("flags", {})["graph_not_viable"] = True
         self._remember_browser_preference()
@@ -160,7 +162,7 @@ class CoreRuntimeService:
         session = self.browser_agent.start_session("https://outlook.office.com/mail/")
         paused = self.browser_agent.pause_for_user_login(session.session_id, reason="Esperando login en Outlook Web")
         run.metadata["browser_session_id"] = paused.session_id
-        run.metadata["task_state"] = "BROWSER_WAITING_FOR_LOGIN"
+        run.metadata["task_state"] = "WAITING_HUMAN_LOGIN"
         self._append_message(run, user_text)
         self._save_run(run)
         return {
@@ -194,30 +196,69 @@ class CoreRuntimeService:
         session = self.browser_agent.mark_login_done(session_id)
         run.metadata["task_state"] = "BROWSER_READY"
         run.metadata["login_detected"] = bool(session.login_detected)
-        run.metadata["task_state"] = "RUNNING"
         run.status = "running"
-
-        # Browser worker real no está en este servicio; entregamos estado claro y finalizamos sin bucles.
-        run.metadata["task_state"] = "DONE"
-        run.status = "completed"
-        run.metadata["result"] = {
-            "status": "ok",
-            "strategy": "browser",
-            "message": "Login detectado. Flujo de navegador listo para extraer el último email.",
-        }
-        self._set_active_run(None)
         self._save_run(run)
+
+        extraction = self._run_browser_extract_step(run, session_id)
+        if extraction.get("status") == "ok":
+            reply = (
+                "Entendido: ya confirmaste login.\n\n"
+                "Ahora mismo estoy haciendo: extraje y validé el último email en navegador.\n\n"
+                "Estado: paso 4/4 (DONE).\n\n"
+                "Si no necesito tu ayuda: sigo automáticamente."
+            )
+            return {"reply": reply, "run": extraction["run"], "result": extraction["result"], "wizard": {"show": True, "state": "DONE", "session_id": session_id, "status_text": "Hecho"}}
+
         return {
             **self._human_reply(
                 run.metadata.get("locale", "es"),
                 "Ya completaste el login en Outlook Web.",
-                "Reanudo el run por navegador y mantengo Graph desactivado en este run.",
-                "Si quieres, pulsa 'Reintentar lectura' para ejecutar extracción cuando el worker esté activo.",
+                "Intenté extraer el email pero encontré un error clasificado.",
+                "Revisa el diagnóstico y vuelve a intentar tras aplicar fix de selectores.",
                 [{"id": "retry", "label": "Reintentar", "kind": "retry"}],
             ),
-            "run": run.model_dump(mode="json"),
-            "wizard": {"show": True, "state": "DONE", "session_id": session_id, "status_text": "Hecho"},
+            "run": extraction["run"],
+            "result": extraction.get("result"),
+            "wizard": {"show": True, "state": "ERROR", "session_id": session_id, "status_text": "Error clasificado"},
         }
+
+    @staticmethod
+    def _triage(error_code: str) -> str:
+        mapping = {
+            "AUTH_REQUIRED": "AUTH_REQUIRED",
+            "SELECTOR_BROKE": "SELECTOR_BROKE",
+            "NAVIGATION_FAIL": "NAVIGATION_FAIL",
+            "MISSING_CAPABILITY": "MISSING_CAPABILITY",
+        }
+        return mapping.get(error_code, "BUG_CORE")
+
+    def _run_browser_extract_step(self, run: Run, session_id: str) -> Dict[str, Any]:
+        run.metadata["task_state"] = "EXTRACTING"
+        html = run.metadata.get("browser_inbox_html")
+        result = self.browser_agent.extract_last_email(session_id, html=html)
+        if result.get("status") == "ok":
+            run.metadata["task_state"] = "VALIDATING"
+            email = result["email"]
+            valid = all(email.get(k) for k in ["subject", "from", "received_at", "preview"])
+            if valid:
+                run.metadata["task_state"] = "DONE"
+                run.status = "completed"
+                run.metadata["result"] = {"status": "ok", "strategy": "browser", "email": email}
+                self._set_active_run(None)
+                self._save_run(run)
+                return {"status": "ok", "run": run.model_dump(mode="json"), "result": run.metadata["result"]}
+
+        run.metadata["task_state"] = "FAILED"
+        run.status = "failed"
+        error_code = result.get("error_code", "BUG_CORE")
+        run.metadata["triage"] = {
+            "classification": self._triage(error_code),
+            "error_code": error_code,
+            "raw": result,
+        }
+        self._save_run(run)
+        self._set_active_run(None)
+        return {"status": "error", "run": run.model_dump(mode="json"), "result": result}
 
     def get_run_state(self, run_id: str) -> Dict[str, Any]:
         payload = self.memory.get_run(run_id)
@@ -236,7 +277,7 @@ class CoreRuntimeService:
             if payload:
                 run = Run.model_validate(payload)
                 run.metadata["browser_session_id"] = paused.session_id
-                run.metadata["task_state"] = "BROWSER_WAITING_FOR_LOGIN"
+                run.metadata["task_state"] = "WAITING_HUMAN_LOGIN"
                 self._save_run(run)
         return {"ok": True, "session": paused.model_dump(mode="json")}
 
@@ -288,7 +329,7 @@ class CoreRuntimeService:
         prefer_browser = prefs.get("outlook_strategy") == "browser"
         graph_not_viable = bool(run.metadata.get("flags", {}).get("graph_not_viable"))
 
-        if state in {"BROWSER_WAITING_FOR_LOGIN", "START_BROWSER_SESSION"}:
+        if state in {"WAITING_HUMAN_LOGIN", "BROWSER_START"}:
             if self._is_login_done_intent(user_text):
                 return self._continue_browser_after_login(run)
             return {
@@ -310,11 +351,11 @@ class CoreRuntimeService:
             return self._ensure_browser_flow(run, user_text)
 
         run.metadata["strategy"] = "graph"
-        run.metadata["task_state"] = "RUNNING"
+        run.metadata["task_state"] = "EXTRACTING"
         result = self.m365_agent.get_last_email()
         run.metadata["last_result"] = result
         if result.get("status") == "auth_required":
-            run.metadata["task_state"] = "NEED_AUTH_GRAPH"
+            run.metadata["task_state"] = "GRAPH_AUTH"
             run.status = "blocked"
             self._save_run(run)
             return {

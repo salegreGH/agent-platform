@@ -7,7 +7,7 @@ from pydantic import BaseModel, Field
 
 
 RunStatus = Literal["pending", "running", "blocked", "completed", "failed"]
-StepStatus = Literal["pending", "running", "blocked", "completed", "failed"]
+StepStatus = Literal["pending", "running", "blocked", "completed", "failed", "retrying"]
 ProposalStatus = Literal["proposed", "approved", "applied", "failed", "rolled_back"]
 
 
@@ -24,9 +24,11 @@ class ActionCall(BaseModel):
 
 class RunStep(BaseModel):
     id: str
+    kind: Literal["api", "browser", "llm", "validation", "compose"] = "compose"
     agent: str
     action: str
     status: StepStatus = "pending"
+    retries: int = 0
     inputs: Dict[str, Any] = Field(default_factory=dict)
     outputs: Dict[str, Any] = Field(default_factory=dict)
     dependencies: List[str] = Field(default_factory=list)
@@ -84,10 +86,13 @@ class BrowserAction(BaseModel):
 
 class BrowserSession(BaseModel):
     session_id: str
-    status: Literal["running", "paused", "completed", "failed"] = "running"
+    status: Literal["created", "open", "paused_login", "ready", "running", "error", "completed", "failed"] = "created"
     current_url: Optional[str] = None
     pause_reason: Optional[str] = None
     login_detected: bool = False
     last_screenshot: Optional[str] = None
+    last_error_code: Optional[str] = None
+    selectors: Dict[str, list[str]] = Field(default_factory=dict)
+    last_action_log: List[Dict[str, Any]] = Field(default_factory=list)
     trace: List[Dict[str, Any]] = Field(default_factory=list)
     updated_at: datetime = Field(default_factory=utc_now)
