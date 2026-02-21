@@ -26,12 +26,14 @@ function App(){
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [apiKey, setApiKey] = useState("");
   const [sidebarTab, setSidebarTab] = useState("agents");
+  const [logsText, setLogsText] = useState("");
   const endRef = useRef(null);
 
   const tabItems = useMemo(()=>([
     {id:"agents",label:"Agents",count:state.agents.length},
     {id:"skills",label:"Skills",count:state.skills.length},
-    {id:"proposals",label:"Proposals",count:state.proposals.length}
+    {id:"proposals",label:"Proposals",count:state.proposals.length},
+    {id:"logs",label:"Logs",count:0}
   ]),[state]);
 
   async function refreshState(){
@@ -41,6 +43,12 @@ function App(){
   }
 
   useEffect(()=>{ refreshState(); },[]);
+
+  async function refreshLogs(){
+    const r = await fetch("/api/logs");
+    const j = await r.json();
+    setLogsText(j.content || "");
+  }
   useEffect(()=>{ endRef.current?.scrollIntoView({behavior:"smooth"}); },[chat,busy]);
 
   async function saveKey(){
@@ -83,6 +91,12 @@ function App(){
   }
 
   function sidebarPanel(){
+    if(sidebarTab === "logs"){
+      return React.createElement("div",{className:"flex flex-col gap-2"},
+        React.createElement("button",{onClick:refreshLogs,className:"px-3 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs"},"Refresh logs"),
+        React.createElement("pre",{className:"text-xs whitespace-pre-wrap max-h-[50vh] overflow-auto bg-slate-950 border border-slate-800 rounded-lg p-2"},logsText || "No logs yet")
+      );
+    }
     if(sidebarTab === "agents"){
       return React.createElement("div",{className:"flex flex-col gap-2 max-h-[55vh] overflow-auto"},
         state.agents.map(a => React.createElement("div",{key:a.id,className:"p-2 rounded-lg bg-slate-900 border border-slate-800"},

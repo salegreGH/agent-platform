@@ -19,6 +19,12 @@ class Memory:
                 status TEXT NOT NULL,
                 created_at REAL NOT NULL
             )""")
+            c.execute("""CREATE TABLE IF NOT EXISTS loop_guard(
+                fingerprint TEXT PRIMARY KEY,
+                attempts INTEGER NOT NULL,
+                last_error TEXT,
+                updated_at REAL NOT NULL
+            )""")
             c.commit()
     def set_json(self, k: str, v: Any):
         with self._conn() as c:
@@ -46,3 +52,19 @@ class Memory:
         with self._conn() as c:
             c.execute("UPDATE proposals SET status=? WHERE proposal_id=?", (status, proposal_id))
             c.commit()
+
+    def mark_attempt(self, fingerprint: str, error: str = "") -> int:
+        with self._conn() as c:
+            row = c.execute("SELECT attempts FROM loop_guard WHERE fingerprint=?", (fingerprint,)).fetchone()
+            attempts = (row[0] if row else 0) + 1
+            c.execute(
+                "INSERT OR REPLACE INTO loop_guard(fingerprint,attempts,last_error,updated_at) VALUES(?,?,?,?)",
+                (fingerprint, attempts, error, time.time()),
+            )
+            c.commit()
+            return attempts
+
+    def get_attempts(self, fingerprint: str) -> int:
+        with self._conn() as c:
+            row = c.execute("SELECT attempts FROM loop_guard WHERE fingerprint=?", (fingerprint,)).fetchone()
+            return int(row[0]) if row else 0
