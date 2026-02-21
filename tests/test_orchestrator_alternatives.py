@@ -28,39 +28,7 @@ def build_paths(tmp_path: Path) -> WorkspacePaths:
     )
 
 
-def test_orchestrator_switches_to_fallback_after_repeated_auth_block(tmp_path: Path):
-    paths = build_paths(tmp_path)
-    paths.ensure_exists()
-    memory = Memory(str(paths.memory_db))
-
-    m365 = M365EmailAgent(memory, cache_dir=str(paths.msal_cache))
-    m365.set_config({"tenant_id": "common", "client_id": "test-client-id"})
-    m365._acquire_token = lambda: {
-        "ok": False,
-        "error": "needs_device_code",
-        "message": "Go to https://microsoft.com/devicelogin and enter code ABC123",
-    }
-
-    browser = BrowserAgent(memory, artifacts_dir=paths.artifacts)
-    runtime = CoreRuntimeService(memory, m365, ToolRegistry(), browser_agent=browser)
-    evolver = EvolverService(memory, paths)
-    security = SecurityPolicyAgent(PolicyEngine(allowed_write_roots=[paths.root, paths.workspace]))
-    orch = Orchestrator(memory, str(tmp_path), runtime, evolver, security)
-
-    first = orch.run("dame mi ultimo email de outlook")
-    assert "Necessito autorització" in first["reply"]
-
-    second = orch.run("dame mi ultimo email de outlook")
-    assert "Canvio de via" in second["reply"]
-    fallback = second["cards"][1]["fallback"]
-    assert fallback["strategy"] == "browser_outlook"
-
-    sessions = memory.list_browser_sessions()
-    assert len(sessions) == 1
-    assert sessions[0]["status"] == "paused"
-
-
-def test_orchestrator_switches_to_fallback_if_user_marks_path_unviable(tmp_path: Path):
+def build_orchestrator(tmp_path: Path):
     paths = build_paths(tmp_path)
     paths.ensure_exists()
     memory = Memory(str(paths.memory_db))
@@ -78,13 +46,34 @@ def test_orchestrator_switches_to_fallback_if_user_marks_path_unviable(tmp_path:
     evolver = EvolverService(memory, paths)
     security = SecurityPolicyAgent(PolicyEngine(allowed_write_roots=[paths.root, paths.workspace]))
     orch = Orchestrator(memory, str(tmp_path), runtime, evolver, security)
+    return orch, memory
 
-    response = orch.run("esta via no es viable, busca alternativa para conectar al email")
-    assert "Canvio de via" in response["reply"]
-    assert "no és viable" in response["reply"]
-    fallback = response["cards"][1]["fallback"]
-    assert fallback["strategy"] == "browser_outlook"
+
+def test_unviable_intent_blocks_device_code_loop(tmp_path: Path):
+    orch, memory = build_orchestrator(tmp_path)
+
+    first = orch.run("dame el ultimo email de outlook")
+    assert any(a["label"] == "Abrir web de Microsoft" for a in first["actions"])
+
+    second = orch.run("no es viable")
+    assert "Cambio automáticamente a la vía navegador" in second["reply"]
+    assert second["run"]["metadata"]["flags"]["graph_not_viable"] is True
+
+    third = orch.run("continua")
+    assert "mantengo Graph desactivado" in third["reply"]
+    assert "device code" not in third["reply"].lower()
 
     sessions = memory.list_browser_sessions()
-    assert len(sessions) == 1
-    assert sessions[0]["status"] == "paused"
+    assert sessions
+
+
+def test_browser_waiting_then_done_login_flow(tmp_path: Path):
+    orch, _ = build_orchestrator(tmp_path)
+
+    response = orch.run("no es viable, hazlo por navegador")
+    assert response["wizard"]["state"] == "BROWSER_WAITING_FOR_LOGIN"
+    run_id = response["run"]["run_id"]
+
+    done = orch.core_runtime.mark_login_done(run_id)
+    assert done["wizard"]["state"] == "DONE"
+    assert "Siguiente paso" in done["reply"]

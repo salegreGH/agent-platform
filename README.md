@@ -78,3 +78,17 @@ Inclou regressions per:
 - apply/rollback proposal
 - core runtime request form
 - models de domini i browser pause/resume amb errors controlats
+
+## 7) Demo: demanar l'últim email sense Graph
+
+1. A Chat escriu: `dame el último email de outlook`.
+2. Si Graph no és viable, escriu: `no es viable`.
+3. El sistema marca el run amb `graph_not_viable=true` i canvia automàticament a Browser Wizard (no torna a demanar device code en aquest run).
+4. Prem **Obrir navegador** i fes login/2FA a Outlook web.
+5. Torna al xat i prem **Ja he fet login** per reanudar.
+6. Consulta l'estat del run si cal:
+   - `GET /core/run/{run_id}/state`
+
+Endpoints nous de suport:
+- `POST /core/run/{run_id}/mark_login_done`
+- `GET /core/run/{run_id}/state`

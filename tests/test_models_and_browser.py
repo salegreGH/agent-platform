@@ -63,9 +63,11 @@ def test_browser_pause_resume_and_controlled_error(tmp_path: Path):
     blocked = browser.execute_action(session.session_id, {"action": "click", "selector": "button"})
     assert blocked["status"] == "paused"
 
-    browser.resume(session.session_id)
+    browser.mark_login_done(session.session_id)
     failed = browser.execute_action(session.session_id, {"action": "open_url", "value": "https://example.com"})
     assert failed["error_code"] == "BROWSER_WORKER_UNAVAILABLE"
+
+    assert browser.get_session(session.session_id).login_detected is True
 
     snap = browser.execute_action(session.session_id, {"action": "screenshot"})
     assert snap["status"] == "ok"

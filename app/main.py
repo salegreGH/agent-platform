@@ -73,6 +73,7 @@ class KeyReq(BaseModel):
 
 class ChatReq(BaseModel):
     message: str
+    run_id: str | None = None
 
 
 class ApproveReq(BaseModel):
@@ -192,7 +193,17 @@ def core_memory():
 
 @app.post("/core/browser/session")
 def core_browser_start(req: ChatReq):
-    return core_runtime.start_browser_session(req.message or None)
+    return core_runtime.start_browser_session(run_id=req.run_id, start_url=req.message or None)
+
+
+@app.post("/core/run/{run_id}/mark_login_done")
+def core_mark_login_done(run_id: str):
+    return core_runtime.mark_login_done(run_id)
+
+
+@app.get("/core/run/{run_id}/state")
+def core_run_state(run_id: str):
+    return core_runtime.get_run_state(run_id)
 
 
 @app.post("/core/browser/{session_id}/pause_login")
