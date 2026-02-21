@@ -87,6 +87,7 @@ class BrowserSession(BaseModel):
     status: Literal["running", "paused", "completed", "failed"] = "running"
     current_url: Optional[str] = None
     pause_reason: Optional[str] = None
+    login_detected: bool = False
     last_screenshot: Optional[str] = None
     trace: List[Dict[str, Any]] = Field(default_factory=list)
     updated_at: datetime = Field(default_factory=utc_now)

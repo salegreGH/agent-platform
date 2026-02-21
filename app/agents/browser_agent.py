@@ -35,6 +35,16 @@ class BrowserAgent:
         self.memory.upsert_browser_session(session.session_id, session.model_dump(mode="json"))
         return session
 
+    def mark_login_done(self, session_id: str) -> BrowserSession:
+        session = self.get_session(session_id)
+        session.login_detected = True
+        session.status = "running"
+        session.pause_reason = None
+        session.updated_at = datetime.now(timezone.utc)
+        session.trace.append({"event": "login_detected", "signal": "inbox_visible"})
+        self.memory.upsert_browser_session(session.session_id, session.model_dump(mode="json"))
+        return session
+
     def resume(self, session_id: str) -> BrowserSession:
         session = self.get_session(session_id)
         if session.status != "paused":

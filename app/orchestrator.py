@@ -17,38 +17,6 @@ class Orchestrator:
         self.security = security
         self.log = logging.getLogger("orchestrator")
 
-    @staticmethod
-    def _user_rejected_current_path(user_text: str) -> bool:
-        text = (user_text or "").lower()
-        rejection_markers = [
-            "no viable",
-            "no es viable",
-            "no funciona",
-            "no puedo",
-            "no tinc",
-            "permisos d'admin",
-            "permiso de admin",
-            "alternativa",
-            "otra via",
-            "otra opción",
-            "altre camí",
-            "fallback",
-        ]
-        return any(marker in text for marker in rejection_markers)
-
-    def _build_fallback_reply(self, core_payload: Dict[str, Any], fallback: Dict[str, Any], attempts: int, reason: str) -> Dict[str, Any]:
-        fallback_steps = "\n".join(f"- {step}" for step in (fallback.get("next_steps") or fallback.get("alternatives") or []))
-        reply = (
-            "Canvio de via per ajudar-te a arribar a l'objectiu sense insistir en un bloqueig.\n\n"
-            f"Motiu: {reason}.\n"
-            f"Intentos detectats: {attempts}.\n"
-            f"Estratègia alternativa: {fallback.get('strategy', 'manual_recovery')}.\n"
-            f"{fallback.get('message', '')}\n\n"
-            "Passos següents:\n"
-            f"{fallback_steps}"
-        )
-        return {"reply": reply, "cards": [core_payload, {"fallback": fallback}]}
-
     def run(self, user_text: str) -> Dict[str, Any]:
         if "connex" in user_text.lower() and "openai" in user_text.lower():
             try:
@@ -57,50 +25,10 @@ class Orchestrator:
             except Exception as e:
                 return {"reply": f"❌ Error connectant amb l'API OpenAI: {e}"}
 
-        core_payload = self.core_runtime.execute({"message": user_text})
-        result = core_payload.get("result") or {}
+        core_payload = self.core_runtime.converse(user_text)
+        if core_payload.get("reply"):
+            return core_payload
 
-        if result.get("status") == "needs_form":
-            form_id = "m365_config_form"
-            self.memory.upsert_form(form_id, "m365_config", "pending", {"fields": result.get("fields", [])})
-            return {
-                "reply": "Per continuar necessito dades de Microsoft 365. Omple el formulari de Connectors i tornaré a provar automàticament.",
-                "cards": [{"form_id": form_id, "questions": result.get("fields", [])}],
-            }
-
-        if result.get("status") == "auth_required":
-            loop_guard = core_payload.get("loop_guard") or {}
-            attempts = int(loop_guard.get("attempts") or 1)
-            user_rejected_path = self._user_rejected_current_path(user_text)
-
-            if attempts >= 2 or user_rejected_path:
-                fallback = self.core_runtime.suggest_outlook_fallback(user_text)
-                reason = "m'has indicat que aquesta via no és viable" if user_rejected_path else "detecto un bucle d'autorització"
-                return self._build_fallback_reply(core_payload, fallback, attempts, reason)
-
-            return {
-                "reply": (
-                    "Necessito autorització (device code).\n\n"
-                    f"{result.get('message')}\n\n"
-                    "Si aquest pas no et va bé, digues 'no és viable' i canviaré directament a alternatives (browser/manual) sense repetir el bloqueig."
-                )
-            }
-
-        if result.get("status") == "ok" and result.get("email"):
-            email = result["email"]
-            return {
-                "reply": (
-                    "He trobat l'últim correu de la safata d'entrada:\n\n"
-                    f"Remitent: {email.get('from')}\nAssumpte: {email.get('subject')}\n"
-                    f"Data: {email.get('receivedDateTime')}\nResum: {email.get('bodyPreview')}"
-                ),
-                "cards": [core_payload],
-            }
-
-        if result.get("status") == "ok" and result.get("emails") is not None:
-            return {"reply": f"He prioritzat {result.get('count')} emails importants sense resposta.", "cards": [core_payload]}
-
-        # capability gap -> evolution proposal
         runtime_context = {
             "agents": load_agents(self.repo_root),
             "connectors": self.core_runtime.connectors_status(),
