@@ -1,4 +1,5 @@
 import os
+import re
 import uuid
 import yaml
 from typing import Dict, Any
@@ -7,6 +8,7 @@ from .skills import load_skills, match_skill
 from .llm import propose_skill, quick_check
 from .generated_tools import execute_tool
 from .agents.m365_email_agent import M365EmailAgent
+from .state import load_agents
 
 
 class Orchestrator:
@@ -25,6 +27,18 @@ class Orchestrator:
 
     def run(self, user_text: str) -> Dict[str, Any]:
 
+        pending = self.memory.get_json("pending_questions") or {}
+        if pending.get("kind") == "m365":
+            parsed = self._parse_key_values(user_text)
+            expected_keys = {q.get("key") for q in (pending.get("questions") or [])}
+            if expected_keys.intersection(parsed.keys()):
+                self.m365.set_config(parsed)
+                self.memory.set_json("pending_questions", None)
+                return {
+                    "reply": "Perfecte, ja he guardat la configuració de forma segura. Ara ja pots tornar-me a demanar qualsevol tasca d'Outlook.",
+                    "cards": []
+                }
+
         skills = load_skills(self.skills_dir)
         skill = match_skill(user_text, skills)
 
@@ -32,7 +46,12 @@ class Orchestrator:
         # 1) NO SKILL → PROPOSAL (auto-evolució)
         # -------------------------------------------------------
         if not skill:
-            proposal = propose_skill(user_text)
+            runtime_context = {
+                "agents": load_agents(self.repo_root),
+                "skills": [{"id": s.get("id"), "action": s.get("action")} for s in skills],
+                "pending_questions": pending,
+            }
+            proposal = propose_skill(user_text, repo_root=self.repo_root, runtime_context=runtime_context)
             proposal_id = str(uuid.uuid4())[:8]
 
             skill_file = os.path.join("data", "skills", f"{proposal['id']}.yml")
@@ -54,16 +73,16 @@ class Orchestrator:
             self.memory.save_proposal(proposal_id, proposal["title"], skill_file, content)
 
             return {
-                "reply": (
-                    "No tinc una skill per això.\n\n"
-                    "He generat una proposta perquè la plataforma evolucioni.\n"
-                    "Revisa-la i aprova-la a la sidebar (Proposals)."
+                "reply": proposal.get("assistant_reply") or (
+                    "Encara no tinc aquesta capacitat integrada.\n\n"
+                    "He preparat una proposta d'evolució i la pots aprovar a la pestanya de Proposals."
                 ),
                 "cards": [
                     {
                         "proposal_id": proposal_id,
                         "title": proposal["title"],
-                        "bundle_preview": bundle
+                        "bundle_preview": bundle,
+                        "execution_notes": proposal.get("execution_notes") or []
                     }
                 ]
             }
@@ -80,10 +99,9 @@ class Orchestrator:
 
                 return {
                     "reply": (
-                        "Per accedir a Outlook necessito configurar Microsoft Graph.\n\n"
-                        "Envia les dades així:\n\n"
-                        "tenant_id=...\n"
-                        "client_id=...\n"
+                        "Per continuar, necessito les dades de Microsoft Graph.\n"
+                        "Pots enviar-les en una sola línia, per exemple:\n\n"
+                        "tenant_id=... client_id=..."
                     ),
                     "cards": [{"questions": questions}]
                 }
@@ -106,25 +124,6 @@ class Orchestrator:
                 }
 
         if action == "outlook_get_last_email":
-
-            pending = self.memory.get_json("pending_questions") or {}
-
-            if pending.get("kind") == "m365" and (
-                "tenant_id=" in user_text or "client_id=" in user_text
-            ):
-                answers = {}
-                for line in user_text.splitlines():
-                    if "=" in line:
-                        k, v = line.split("=", 1)
-                        answers[k.strip()] = v.strip()
-
-                self.m365.set_config(answers)
-                self.memory.set_json("pending_questions", None)
-
-                return {
-                    "reply": "✅ Configuració guardada. Torna a demanar l'últim email."
-                }
-
             result = self.m365.get_last_email()
 
             if result.get("status") == "auth_required":
@@ -139,11 +138,11 @@ class Orchestrator:
                 email = result.get("email", {})
                 return {
                     "reply": (
-                        "📩 Últim email:\n\n"
-                        f"From: {email.get('from')}\n"
-                        f"Subject: {email.get('subject')}\n"
-                        f"Date: {email.get('receivedDateTime')}\n"
-                        f"Preview: {email.get('bodyPreview')}"
+                        "He trobat l'últim correu de la safata d'entrada:\n\n"
+                        f"Remitent: {email.get('from')}\n"
+                        f"Assumpte: {email.get('subject')}\n"
+                        f"Data: {email.get('receivedDateTime')}\n"
+                        f"Resum: {email.get('bodyPreview')}"
                     ),
                     "cards": [result]
                 }
@@ -191,6 +190,10 @@ class Orchestrator:
             "reply": "Skill trobada però no executable encara.",
             "cards": [{"skill": skill}]
         }
+
+    def _parse_key_values(self, text: str) -> Dict[str, str]:
+        pairs = re.findall(r"([a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*([^\s]+)", text)
+        return {k.strip(): v.strip() for k, v in pairs}
 
     # -----------------------------------------------------------
     # APPLY PROPOSAL
