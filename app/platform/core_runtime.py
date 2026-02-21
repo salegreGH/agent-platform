@@ -120,7 +120,7 @@ class CoreRuntimeService:
         run.metadata["current_step"] = step_id
 
     def _classify_error(self, error_code: str) -> str:
-        known = {"AUTH_REQUIRED", "NOT_READY", "SELECTOR_BROKE", "IFRAME_ISSUE", "NAVIGATION_FAIL", "TOOL_NOT_IMPLEMENTED", "BUG_CORE"}
+        known = {"AUTH_REQUIRED", "NOT_READY", "SELECTOR_BROKE", "IFRAME_ISSUE", "NAVIGATION_FAIL", "TOOL_NOT_IMPLEMENTED", "BUG_CORE", "POPUP_BLOCKING", "NOT_IN_INBOX", "TIMING"}
         if error_code in known:
             return error_code
         tool_exists = bool(self.browser_agent and self.browser_agent.has_action("browser.outlook.extract_latest_email"))
@@ -149,6 +149,15 @@ class CoreRuntimeService:
                 out = self._run_browser_extract_step(run, session_id)
                 out["wizard"] = {"show": True, "state": "DONE" if out.get("status") == "ok" else "ERROR", "session_id": session_id, "status_text": "Hecho" if out.get("status") == "ok" else "Error"}
                 return out
+
+        if not session_id:
+            for candidate in self.memory.list_browser_sessions():
+                if candidate.get("login_detected") and candidate.get("status") in {"ready", "running", "open"}:
+                    run.metadata["browser_session_id"] = candidate.get("session_id")
+                    run.metadata["auth_status"] = "READY"
+                    run.metadata["task_state"] = "BROWSER_READY"
+                    self._save_run(run)
+                    return self._run_browser_extract_step(run, candidate.get("session_id"))
 
         session = self.browser_agent.start_session("https://outlook.office.com/mail/")
         paused = self.browser_agent.pause_for_user_login(session.session_id, reason="Esperando login en Outlook Web")
@@ -195,14 +204,25 @@ class CoreRuntimeService:
             return {"reply": "No he podido ejecutar validación de sesión porque no hay browser_session_id.", "run": run.model_dump(mode="json")}
 
         self._mark_step(run, "validate_session", "running")
-        session = self.browser_agent.mark_login_done(session_id)
-        run.metadata["auth_status"] = "READY" if session.login_detected else "AUTH_REQUIRED"
-        run.metadata["task_state"] = "BROWSER_READY" if session.login_detected else "WAITING_HUMAN_LOGIN"
-        self._mark_step(run, "validate_session", "completed", output={"login_detected": session.login_detected, "session_id": session_id})
+        self.browser_agent.mark_login_done(session_id)
+        readiness = self.browser_agent.validate_outlook_ready(
+            session_id,
+            html=run.metadata.get("browser_inbox_html"),
+            current_url=run.metadata.get("browser_current_url"),
+        )
+        ready = readiness.get("ready", False)
+        run.metadata["auth_status"] = "READY" if ready else "AUTH_REQUIRED"
+        run.metadata["task_state"] = "BROWSER_READY" if ready else "WAITING_HUMAN_LOGIN"
+        self._mark_step(run, "validate_session", "completed", output={"login_detected": ready, "session_id": session_id, "missing": readiness.get("missing", [])})
         self._save_run(run)
 
-        if not session.login_detected:
-            return {"reply": "No he podido validar Inbox. Vuelve a intentar login.", "run": run.model_dump(mode="json")}
+        if not ready:
+            missing = readiness.get("missing", [])
+            if "not_in_inbox" in missing:
+                self.browser_agent.apply_recovery_strategy(session_id, "navigate_to_inbox")
+            if any(m in missing for m in {"consent", "account_picker", "inbox_not_visible"}):
+                self.browser_agent.apply_recovery_strategy(session_id, "close_popups")
+            return {"reply": f"Aún no está lista la sesión: {', '.join(missing) or 'inbox no visible'}.", "run": run.model_dump(mode="json")}
         out = self._run_browser_extract_step(run, session_id)
         out["wizard"] = {"show": True, "state": "DONE" if out.get("status") == "ok" else "ERROR", "session_id": session_id, "status_text": "Hecho" if out.get("status") == "ok" else "Error"}
         return out
@@ -229,7 +249,8 @@ class CoreRuntimeService:
             run=run.model_dump(mode="json"),
             failure_result=failure_result,
             session=self.browser_agent.get_session(session_id).model_dump(mode="json") if self.browser_agent else None,
-            retry_callback=lambda: self._run_browser_extract_step(run, session_id),
+            retry_callback=lambda _strategy: self._run_browser_extract_step(run, session_id),
+            strategy_callback=lambda strategy: self.browser_agent.apply_recovery_strategy(session_id, strategy) if self.browser_agent else {"ok": False},
         )
         updated_payload = self.memory.get_run(run_id)
         updated_run = Run.model_validate(updated_payload) if updated_payload else run

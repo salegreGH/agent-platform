@@ -31,12 +31,28 @@ def test_login_done_auto_triggers_extract(tmp_path: Path):
     session = runtime.browser_agent.start_session("https://outlook.office.com/mail/")
     runtime.browser_agent.pause_for_user_login(session.session_id)
     run.metadata["browser_session_id"] = session.session_id
-    run.metadata["browser_inbox_html"] = "<span data-field='from'>Ops</span><span data-field='subject'>Hi</span><span data-field='received'>now</span><span data-field='preview'>body</span>"
+    run.metadata["browser_current_url"] = "https://outlook.office.com/mail/"
+    run.metadata["browser_inbox_html"] = "<main>Inbox</main><span data-field='from'>Ops</span><span data-field='subject'>Hi</span><span data-field='received'>now</span><span data-field='preview'>body</span>"
     runtime._save_run(run)
 
     out = runtime.mark_login_done(run.run_id)
     assert out["status"] == "ok"
     assert out["run"]["metadata"]["auth_status"] == "READY"
+
+
+def test_login_done_requires_inbox_ready(tmp_path: Path):
+    runtime, _ = build_runtime(tmp_path)
+    run = runtime._new_run("ultimo email outlook", {"nodes": []})
+    session = runtime.browser_agent.start_session("https://login.microsoftonline.com/")
+    runtime.browser_agent.pause_for_user_login(session.session_id)
+    run.metadata["browser_session_id"] = session.session_id
+    run.metadata["browser_current_url"] = "https://login.microsoftonline.com/"
+    run.metadata["browser_inbox_html"] = "<div>Select an account</div>"
+    runtime._save_run(run)
+
+    out = runtime.mark_login_done(run.run_id)
+    assert "not_in_inbox" in out["reply"]
+    assert out["run"]["metadata"]["task_state"] == "WAITING_HUMAN_LOGIN"
 
 
 def test_retry_creates_running_step(tmp_path: Path):
