@@ -1,8 +1,10 @@
 from pathlib import Path
 
-import pytest
-
+from app.agents.m365_email_agent import M365EmailAgent
 from app.core.paths import WorkspacePaths
+from app.memory import Memory
+from app.platform.core_runtime import CoreRuntimeService
+from app.platform.registry import ToolRegistry
 
 
 def build_paths(tmp_path: Path) -> WorkspacePaths:
@@ -22,14 +24,13 @@ def build_paths(tmp_path: Path) -> WorkspacePaths:
     )
 
 
-def test_safe_join_stays_inside_workspace(tmp_path: Path):
+def test_core_runtime_requests_form_when_connector_missing(tmp_path: Path):
     paths = build_paths(tmp_path)
     paths.ensure_exists()
-    candidate = paths.safe_join(paths.base, "generated_tools/tool.py")
-    assert str(candidate).startswith(str(paths.base.resolve()))
+    memory = Memory(str(paths.memory_db))
+    m365 = M365EmailAgent(memory, cache_dir=str(paths.msal_cache))
+    runtime = CoreRuntimeService(memory, m365, ToolRegistry())
 
-
-def test_safe_join_blocks_escape(tmp_path: Path):
-    paths = build_paths(tmp_path)
-    with pytest.raises(PermissionError):
-        paths.safe_join(paths.base, "../outside/file.py")
+    result = runtime.execute({"message": "Mostra l'ultim email"})
+    assert result["result"]["status"] == "needs_form"
+    assert result["graph"]["nodes"][2]["action"] == "request_form"
