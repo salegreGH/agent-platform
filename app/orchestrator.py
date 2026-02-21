@@ -37,7 +37,29 @@ class Orchestrator:
             }
 
         if result.get("status") == "auth_required":
-            return {"reply": f"Necessito autorització (device code).\n\n{result.get('message')}"}
+            loop_guard = core_payload.get("loop_guard") or {}
+            attempts = int(loop_guard.get("attempts") or 1)
+
+            if attempts >= 2:
+                fallback = self.core_runtime.suggest_outlook_fallback(user_text)
+                fallback_steps = "\n".join(f"- {step}" for step in (fallback.get("next_steps") or fallback.get("alternatives") or []))
+                reply = (
+                    "He detectat que l'autorització de Outlook està en bucle i canvio d'estratègia automàticament.\n\n"
+                    f"Intentos detectats: {attempts}.\n"
+                    f"Estratègia alternativa: {fallback.get('strategy', 'manual_recovery')}.\n"
+                    f"{fallback.get('message', '')}\n\n"
+                    "Passos següents:\n"
+                    f"{fallback_steps}"
+                )
+                return {"reply": reply, "cards": [core_payload, {"fallback": fallback}]}
+
+            return {
+                "reply": (
+                    "Necessito autorització (device code).\n\n"
+                    f"{result.get('message')}\n\n"
+                    "Si aquest pas falla, aplicaré fallback automàtic (browser/manual) per evitar repetir el mateix bloqueig."
+                )
+            }
 
         if result.get("status") == "ok" and result.get("email"):
             email = result["email"]

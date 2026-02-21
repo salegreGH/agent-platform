@@ -145,3 +145,33 @@ class CoreRuntimeService:
 
     def browser_sessions(self) -> Dict[str, Any]:
         return {"sessions": self.memory.list_browser_sessions()}
+
+    def suggest_outlook_fallback(self, goal: str) -> Dict[str, Any]:
+        if not self.browser_agent:
+            return {
+                "status": "fallback_unavailable",
+                "message": "No puc executar fallback de navegador perquè el BrowserAgent no està actiu.",
+                "alternatives": [
+                    "Activar BrowserAgent/worker Playwright via proposta Evolve",
+                    "Completar autorització device-code de Microsoft Graph",
+                    "Pujar un fitxer .eml/.msg perquè pugui extreure el contingut localment",
+                ],
+            }
+
+        session = self.browser_agent.start_session("https://outlook.office.com/mail/")
+        paused = self.browser_agent.pause_for_user_login(
+            session.session_id,
+            reason="Login manual requerit a Outlook Web per executar fallback browser.",
+        )
+        return {
+            "status": "fallback_started",
+            "strategy": "browser_outlook",
+            "message": "He preparat una sessió de navegador com a alternativa a Graph API.",
+            "session_id": paused.session_id,
+            "pause_reason": paused.pause_reason,
+            "next_steps": [
+                "Obre la pestanya Browser i completa login/2FA manualment",
+                "Prem Continue/Resume a la sessió",
+                "Reexecuta la consulta per obtenir l'últim email",
+            ],
+        }
