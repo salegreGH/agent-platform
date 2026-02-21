@@ -9,49 +9,62 @@ from pathlib import Path
 class WorkspacePaths:
     """Single source of truth for writable runtime paths."""
 
-    base: Path
+    root: Path
+    workspace: Path
     generated_tools: Path
     generated_skills: Path
     logs: Path
     cache: Path
     msal_cache: Path
+    secrets: Path
+    proposals: Path
+    artifacts: Path
+    attachments: Path
     memory_db: Path
+
+    @property
+    def base(self) -> Path:
+        return self.workspace
 
     @classmethod
     def from_env(cls) -> "WorkspacePaths":
         local_appdata = os.getenv("LOCALAPPDATA")
         if local_appdata:
-            base = Path(local_appdata) / "AgentPlatform" / "workspace"
+            root = Path(local_appdata) / "AgentPlatform"
         else:
-            base = Path.home() / ".agentplatform" / "workspace"
+            root = Path.home() / ".agentplatform"
 
-        generated_tools = base / "generated_tools"
-        generated_skills = base / "generated_skills"
-        logs = base / "logs"
-        cache = base / "cache"
-        msal_cache = base / "msal_cache"
-        memory_db = base / "memory.db"
-
+        workspace = root / "workspace"
         obj = cls(
-            base=base,
-            generated_tools=generated_tools,
-            generated_skills=generated_skills,
-            logs=logs,
-            cache=cache,
-            msal_cache=msal_cache,
-            memory_db=memory_db,
+            root=root,
+            workspace=workspace,
+            generated_tools=workspace / "generated_tools",
+            generated_skills=workspace / "generated_skills",
+            logs=root / "logs",
+            cache=root / "cache",
+            msal_cache=root / "msal_cache",
+            secrets=root / "secrets",
+            proposals=root / "proposals",
+            artifacts=root / "artifacts",
+            attachments=root / "attachments",
+            memory_db=root / "memory.db",
         )
         obj.ensure_exists()
         return obj
 
     def ensure_exists(self) -> None:
         for directory in [
-            self.base,
+            self.root,
+            self.workspace,
             self.generated_tools,
             self.generated_skills,
             self.logs,
             self.cache,
             self.msal_cache,
+            self.secrets,
+            self.proposals,
+            self.artifacts,
+            self.attachments,
         ]:
             directory.mkdir(parents=True, exist_ok=True)
 
