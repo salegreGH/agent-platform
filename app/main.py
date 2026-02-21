@@ -7,6 +7,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from .agents.browser_agent import BrowserAgent
 from .agents.m365_email_agent import M365EmailAgent
 from .core.logging import configure_logging
 from .core.paths import WorkspacePaths
@@ -17,6 +18,7 @@ from .platform.evolver import EvolverService
 from .platform.policy import PolicyEngine, SecurityPolicyAgent
 from .platform.registry import AgentRegistry, ToolRegistry
 from .platform.contracts import AgentContract
+from .platform.models import ConnectorConfig
 from .state import load_skills_state
 from .tools.secrets import set_secret
 
@@ -34,11 +36,13 @@ agent_registry.register(AgentContract(id="orchestrator", name="OrchestratorAgent
 agent_registry.register(AgentContract(id="planner", name="PlannerAgent", purpose="Task graph planning", capabilities=["task_graph"]))
 agent_registry.register(AgentContract(id="triage", name="TriageAgent", purpose="Anti-loop diagnostics", capabilities=["classify_error", "anti_loop"]))
 agent_registry.register(AgentContract(id="m365_outlook", name="M365OutlookAgent", purpose="Outlook connector", capabilities=["get_latest_email", "list_important_unreplied", "draft_reply", "send_email"]))
+agent_registry.register(AgentContract(id="browser", name="BrowserAgent", purpose="Browser automation worker", capabilities=["open_url", "click", "type", "pause_for_login", "resume"]))
 
 policy_engine = PolicyEngine(allowed_write_roots=[WORKSPACE.root, WORKSPACE.workspace])
 security_agent = SecurityPolicyAgent(policy_engine)
 
-core_runtime = CoreRuntimeService(memory, m365, tool_registry)
+browser_agent = BrowserAgent(memory, artifacts_dir=WORKSPACE.artifacts)
+core_runtime = CoreRuntimeService(memory, m365, tool_registry, browser_agent=browser_agent)
 evolver = EvolverService(memory, WORKSPACE)
 orch = Orchestrator(memory, repo_root=REPO_ROOT, core_runtime=core_runtime, evolver=evolver, security=security_agent)
 
@@ -89,8 +93,11 @@ def state():
         "skills": load_skills_state(str(WORKSPACE.generated_skills)),
         "proposals": memory.list_proposals(),
         "tasks": memory.list_tasks(),
+        "runs": memory.list_runs(),
         "forms": memory.list_forms(),
         "connectors": core_runtime.connectors_status(),
+        "connector_configs": memory.list_connector_configs(),
+        "browser_sessions": memory.list_browser_sessions(),
         "configs": {"workspace": str(WORKSPACE.root)},
     }
 
@@ -129,8 +136,17 @@ def evolve_rollback():
 
 @app.post("/api/forms/{form_id}/submit")
 def forms_submit(form_id: str, req: FormSubmitReq):
-    memory.upsert_form(form_id, "m365_config", "submitted", memory.get_form(form_id).get("schema", {}), req.values)
+    form = memory.get_form(form_id) or {"schema": {}}
+    memory.upsert_form(form_id, "m365_config", "submitted", form.get("schema", {}), req.values)
     m365.set_config(req.values)
+    connector_cfg = ConnectorConfig(
+        connector_id="m365_outlook",
+        auth_mode=req.values.get("auth_mode", "device_code"),
+        scopes=req.values.get("scopes", ["Mail.Read", "User.Read"]),
+        settings=req.values,
+        enabled=True,
+    )
+    memory.upsert_connector_config("m365_outlook", connector_cfg.model_dump(mode="json"))
     return {"ok": True}
 
 
@@ -161,6 +177,26 @@ def core_connectors():
 @app.get("/core/memory")
 def core_memory():
     return {"tasks": memory.list_tasks(), "forms": memory.list_forms()}
+
+
+@app.post("/core/browser/session")
+def core_browser_start(req: ChatReq):
+    return core_runtime.start_browser_session(req.message or None)
+
+
+@app.post("/core/browser/{session_id}/pause_login")
+def core_browser_pause_login(session_id: str):
+    return core_runtime.pause_browser_for_login(session_id)
+
+
+@app.post("/core/browser/{session_id}/resume")
+def core_browser_resume(session_id: str):
+    return core_runtime.resume_browser_session(session_id)
+
+
+@app.get("/core/browser/sessions")
+def core_browser_sessions():
+    return core_runtime.browser_sessions()
 
 
 @app.get("/core/health")

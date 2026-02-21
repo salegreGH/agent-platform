@@ -1,96 +1,80 @@
-# Agent Platform v5 (platform-first)
+# Agent Platform v6 (Control Plane + Data Plane)
 
-Plataforma agèntica local amb **Control Plane (Evolver)** + **Core Runtime reiniciable**, orientada a automatització corporativa i autoevolució segura.
+Plataforma local d'agents inspirada en Twin, orientada a conversa natural + workflows executables, amb separació de serveis, persistència i autoevolució governada per proposals.
 
-## 1) Auditoria ràpida (abans vs ara)
+## 1) Auditoria del repo actual
 
-### Què hi havia
-- FastAPI monolític amb `chat/state/proposals` bàsics.
-- Agent M365 Outlook parcial (últim email + triatge simple).
-- Proposals simples al workspace.
-- UI amb pestanyes bàsiques (agents/skills/proposals/logs).
+### Fortaleses detectades
+- FastAPI funcional amb UI web i endpoints de control plane bàsics.
+- `EvolverService` amb apply/rollback de proposals sobre workspace segur.
+- Runtime amb `TaskPlanner` + `AntiLoopGuard` i connector MVP de Microsoft 365 Outlook.
+- Persistència SQLite ja present (`kv`, `proposals`, `tasks`, `forms`, `loop_guard`).
 
-### Què faltava
-- Split clar Evolver/Core.
-- Contractes d’agents, task graph estructurat, registries de tools/agents.
-- Política de seguretat centralitzada (allowed paths/actions).
-- Forms/uploads com a flux oficial per dades mancants.
-- Pipeline release/rollback gestionat pel control plane.
+### Buits detectats abans del refactor actual
+- Faltaven models de domini forts (Run/Step/ActionCall/ConnectorConfig/Proposal).
+- No hi havia persistència explícita de runs ni configuracions de connectors typed.
+- Browser automation no tenia contracte de sessió/pause-resume orientat a login/2FA.
+- L'estat del sistema no exposava sessions browser ni runs estructurats.
 
-### Què s’ha implementat en aquest refactor
-- Milestone A-B: workspace ampliat + policies + registries + task graph + anti-loop.
-- Milestone C-D: proposta/apply/rollback MVP + UI moderna amb tabs extenses, forms i uploads.
-- MVP Outlook E2E: formulari de configuració, auth device-code, fetch de correu, triatge d’importants.
+## 2) Estructura i models de dades implementats
 
-## 2) Arquitectura definitiva de carpetes
+### Models (`app/platform/models.py`)
+- `Run`, `RunStep`: estat executable per run amb steps, dependències i sensibilitat de dades.
+- `ActionCall`: contracte de tool-calling estructurat.
+- `Proposal`: estat i metadades de desplegament/rollback.
+- `ConnectorConfig`: configuració typed de connectors (auth, scopes, retries, cache).
+- `BrowserSession`, `BrowserAction`: sessions browser amb trace i pause/resume.
 
-```text
-app/
-  main.py                     # Evolver API + proxy Core API
-  orchestrator.py             # OrchestratorAgent (classify/delegate/evolve)
-  memory.py                   # persistència (kv, proposals, tasks, forms, loop_guard)
-  agents/
-    m365_email_agent.py       # Connector Outlook MVP
-  platform/
-    contracts.py              # contractes d'agents, task graph, tool calls
-    registry.py               # agent registry + tool registry
-    policy.py                 # PolicyEngine + SecurityPolicyAgent
-    task_graph.py             # planner + anti-loop guard
-    core_runtime.py           # Core Runtime Service (/core/*)
-    evolver.py                # Evolver service (proposals/apply/rollback)
-  core/
-    paths.py                  # workspace root + subpaths segur
-    logging.py
-ui/
-  index.html
-  app.js                      # chat + tabs + forms + uploads + proposals
-tests/
-  test_workspace_paths.py
-  test_proposal_apply.py
-  test_core_runtime.py
-```
+### Persistència (`app/memory.py`)
+Taules noves:
+- `runs`
+- `connector_configs`
+- `browser_sessions`
 
-## 3) Serveis
+Això amplia la base prèvia (`kv`, `proposals`, `tasks`, `forms`, `loop_guard`) i permet Data Plane observable.
 
-### Evolver Service (control plane)
-- Endpoints: `/api/state`, `/api/chat`, `/api/proposals/approve`, `/api/evolve/rollback`, `/api/forms/*`, `/api/uploads`.
-- Responsable de proposals i release controlat.
+## 3) Arquitectura de serveis
 
-### Core Runtime Service (reiniciable)
-- Endpoints: `/core/execute`, `/core/tools`, `/core/connectors`, `/core/memory`, `/core/health`.
-- Responsable d’execució de task graph i connectors.
+### Control Plane (sempre encès)
+- `app/main.py` (UI + API)
+- `app/platform/evolver.py`
+- Governa proposals, formularis, uploads, estat global i rollback.
 
-## 4) Workspace writable
+### Data Plane (reiniciable)
+- `app/platform/core_runtime.py`
+- Executa runs, planifica steps i persisteix estat de run.
+- Exposa connectors i sessions browser via API `/core/*`.
 
-Per defecte a Windows: `%LOCALAPPDATA%/AgentPlatform/`.
+### Worker Browser (MVP contract-first)
+- `app/agents/browser_agent.py`
+- Sessió/pause/resume implementats.
+- Si falta runtime Playwright, retorna error controlat `BROWSER_WORKER_UNAVAILABLE` + pla de resolució (no stub silenciós).
 
-```text
-AgentPlatform/
-  workspace/
-    generated_skills/
-    generated_tools/
-  logs/
-  cache/
-  secrets/
-  memory.db
-  attachments/
-  msal_cache/
-  proposals/
-  artifacts/
-```
+## 4) Milestones coberts en aquest increment
 
-## 5) One-click run
+- ✅ Milestone A: split operatiu control/data plane + workspace + logs + secrets.
+- ✅ Milestone B: agent framework/runtime amb models de domini, runs, connector configs i anti-loop persistit.
+- 🟡 Milestone C: Browser sessions + pause/resume + contractes d'acció; execució real Playwright pendent de worker dedicat.
+- 🟡 Milestone D i següents: parcialment iniciats; pendent evolució completa de UX tabs Twin-level, pipeline auto-evolve complet i MVPs Jira/Clockify/Office.
 
-```powershell
-cd "C:\path\to\agent-platform"
-powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1
-.\scripts\run.bat
-```
+## 5) API clau
 
-UI: `http://127.0.0.1:8787`
+- `GET /api/state` → agents, tasks, runs, forms, connectors, connector configs, browser sessions.
+- `POST /api/forms/{form_id}/submit` → guarda formulari i normalitza `ConnectorConfig`.
+- `POST /core/execute` → executa run i persisteix timeline de steps.
+- `POST /core/browser/session` → crea sessió browser.
+- `POST /core/browser/{session_id}/pause_login` → pausa per login/2FA.
+- `POST /core/browser/{session_id}/resume` → reprèn sessió.
+- `GET /core/browser/sessions` → llista sessions.
 
 ## 6) Tests
 
 ```bash
 pytest -q
 ```
+
+Inclou regressions per:
+- workspace safety
+- apply/rollback proposal
+- core runtime request form
+- models de domini i browser pause/resume amb errors controlats
