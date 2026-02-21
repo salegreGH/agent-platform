@@ -1,0 +1,10 @@
+id: get_outlook_tenant_details
+title: Get Outlook Tenant Details
+triggers:
+- get outlook tenant details
+- show outlook tenant info
+- outlook tenant info
+requires:
+- m365_email
+action: get_outlook_tenant_details
+tool_path: data\generated_tools\get_outlook_tenant_details.py

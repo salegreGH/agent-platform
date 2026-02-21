@@ -1,0 +1,10 @@
+id: outlook_important_unanswered
+title: "Emails importants sense respondre"
+triggers:
+  - "importants"
+  - "sin responder"
+  - "sense respondre"
+  - "important unanswered"
+requires:
+  - m365_email
+action: outlook_triage_important_unanswered

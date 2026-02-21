@@ -1,0 +1,10 @@
+id: send_email_outlook
+title: Enviar correu amb Outlook
+triggers:
+- envia correu
+- enviar correu outlook
+- manda un email
+requires:
+- m365_email
+action: send_email_outlook
+tool_path: data\generated_tools\send_email_outlook.py

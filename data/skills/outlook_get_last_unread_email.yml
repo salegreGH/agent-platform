@@ -1,0 +1,11 @@
+id: outlook_get_last_unread_email
+title: Obtenir l'últim email no llegit
+triggers:
+- últim email no llegit
+- email per llegir
+- últim correu sense llegir
+- mostra el meu últim email no llegit
+requires:
+- m365_email
+action: get_last_unread_email
+tool_path: data\generated_tools\outlook_get_last_unread_email.py

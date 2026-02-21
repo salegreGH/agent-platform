@@ -1,0 +1,10 @@
+id: outlook_latest_email
+title: Últim Email a Outlook
+triggers:
+- últim email
+- ls ultim email a outlook
+- mostra últim email a la meva safata d'entrada
+requires:
+- m365_email
+action: get_latest_email_outlook
+tool_path: data\generated_tools\outlook_latest_email.py

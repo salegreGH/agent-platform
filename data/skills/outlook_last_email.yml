@@ -1,0 +1,10 @@
+id: outlook_last_email
+title: "Últim email d'Outlook"
+triggers:
+  - "últim email"
+  - "ultimo email"
+  - "last email"
+  - "último correo"
+requires:
+  - m365_email
+action: outlook_get_last_email

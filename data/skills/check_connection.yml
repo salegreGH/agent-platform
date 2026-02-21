@@ -1,0 +1,10 @@
+id: check_openai_connection
+title: "Comprovar connexió (LLM)"
+triggers:
+  - "tens conexio"
+  - "tens connexio"
+  - "estas connectat"
+  - "pots accedir"
+  - "connection"
+requires: []
+action: check_openai_connection

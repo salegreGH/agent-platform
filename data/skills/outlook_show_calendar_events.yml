@@ -1,0 +1,11 @@
+id: outlook_show_calendar_events
+title: Mostrar esdeveniments del calendari d'Outlook
+triggers:
+- mostrar esdeveniments
+- calendari d'Outlook
+- quins esdeveniments tinc
+- llistar events de calendari
+requires:
+- m365_email
+action: show_outlook_calendar_events
+tool_path: data\generated_tools\outlook_calendar.py

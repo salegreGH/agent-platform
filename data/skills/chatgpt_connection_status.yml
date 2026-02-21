@@ -1,0 +1,12 @@
+id: chatgpt_connection_status
+title: Check ChatGPT Connection Status
+triggers:
+- estas conectat a chatgpt?
+- estàs connectat a chatgpt?
+- estàs connectat a chatgpt?
+- Estàs connectat a ChatGPT?
+- ChatGPT conectat?
+- Està connectat a ChatGPT?
+requires: []
+action: check_chatgpt_connection_status
+tool_path: data\generated_tools\chatgpt_connection.py

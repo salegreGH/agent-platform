@@ -1,0 +1,7 @@
+agents:
+  - id: orchestrator
+    name: Orchestrator
+    purpose: "Entén la teva petició, planifica i orquestra tools/agents. Pot proposar noves skills."
+  - id: m365_email
+    name: M365 Email Agent
+    purpose: "Accés a Outlook via Microsoft Graph (Mail.Read)."
