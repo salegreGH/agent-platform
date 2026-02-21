@@ -35,6 +35,10 @@ class RunStep(BaseModel):
     requires_confirmation: bool = False
     data_sensitivity: Literal["low", "medium", "high"] = "low"
     error: Optional[str] = None
+    started_at: Optional[datetime] = None
+    finished_at: Optional[datetime] = None
+    output_json: Dict[str, Any] = Field(default_factory=dict)
+    error_json: Dict[str, Any] = Field(default_factory=dict)
 
 
 class Run(BaseModel):

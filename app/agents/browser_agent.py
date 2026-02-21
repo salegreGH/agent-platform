@@ -12,11 +12,16 @@ from ..platform.models import BrowserAction, BrowserSession
 
 
 class BrowserAgent:
+    TOOL_EXTRACT = "browser.outlook.extract_latest_email"
+
     def __init__(self, memory: Memory, artifacts_dir: Path, selectors_path: Path | None = None):
         self.memory = memory
         self.artifacts_dir = artifacts_dir
         self.artifacts_dir.mkdir(parents=True, exist_ok=True)
         self.selectors_path = selectors_path
+
+    def has_action(self, action_name: str) -> bool:
+        return action_name in {self.TOOL_EXTRACT, "extract_last_email"}
 
     def _load_outlook_selectors(self) -> Dict[str, Any]:
         if self.selectors_path and self.selectors_path.exists():
@@ -25,10 +30,10 @@ class BrowserAgent:
             "inbox_ready": ["aria-label=Inbox", "role=main", "div[data-app-section='message-list']"],
             "message_item": ["div[role='row']", "div[data-convid]", "article[role='listitem']"],
             "field_patterns": {
-                "subject": [r'data-field=["\']subject["\']>([^<]+)<', r'aria-label=["\']Subject["\'][^>]*>([^<]+)<'],
-                "from": [r'data-field=["\']from["\']>([^<]+)<', r'aria-label=["\']From["\'][^>]*>([^<]+)<'],
-                "received_at": [r'data-field=["\']received["\']>([^<]+)<', r'aria-label=["\']Received["\'][^>]*>([^<]+)<'],
-                "preview": [r'data-field=["\']preview["\']>([^<]+)<', r'class=["\'][^"\']*preview[^"\']*["\'][^>]*>([^<]+)<'],
+                "subject": [r"data-field=[\"']subject[\"']>([^<]+)<", r"aria-label=[\"']Subject[\"'][^>]*>([^<]+)<"],
+                "from": [r"data-field=[\"']from[\"']>([^<]+)<", r"aria-label=[\"']From[\"'][^>]*>([^<]+)<"],
+                "received": [r"data-field=[\"']received[\"']>([^<]+)<", r"aria-label=[\"']Received[\"'][^>]*>([^<]+)<"],
+                "preview": [r"data-field=[\"']preview[\"']>([^<]+)<", r"class=[\"'][^\"']*preview[^\"']*[\"'][^>]*>([^<]+)<"],
             },
         }
 
@@ -93,73 +98,91 @@ class BrowserAgent:
                 return re.sub(r"\s+", " ", m.group(1)).strip()
         return None
 
-    def extract_last_email(self, session_id: str, *, html: str | None = None) -> Dict[str, Any]:
+    def _save_failure_artifacts(self, session: BrowserSession, html: str) -> dict[str, str]:
+        ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+        base = f"{session.session_id}-{ts}"
+        html_path = self.artifacts_dir / f"{base}.html"
+        html_path.write_text(html, encoding="utf-8")
+        screenshot_path = self.artifacts_dir / f"{base}.png"
+        screenshot_path.write_bytes(b"placeholder")
+        return {"html_dump_path": str(html_path), "screenshot_path": str(screenshot_path)}
+
+    def extract_latest_email_outlook_web(self, session_id: str, *, html: str | None = None) -> Dict[str, Any]:
         session = self.get_session(session_id)
-        if session.status == "paused_login":
+        if session.status == "paused_login" or not session.login_detected:
             return {"status": "blocked", "error_code": "AUTH_REQUIRED", "message": "Login/2FA pendiente."}
 
         source = html or ""
         session.status = "running"
         session.updated_at = datetime.now(timezone.utc)
-        session.last_action_log.append({"action": "extract_last_email", "ts": session.updated_at.isoformat()})
+        session.last_action_log.append({"action": self.TOOL_EXTRACT, "ts": session.updated_at.isoformat()})
 
         if not source:
             session.status = "error"
-            session.last_error_code = "MISSING_CAPABILITY"
+            session.last_error_code = "NOT_READY"
             self.memory.upsert_browser_session(session.session_id, session.model_dump(mode="json"))
             return {
                 "status": "error",
-                "error_code": "MISSING_CAPABILITY",
-                "message": "No browser worker content available for extraction.",
+                "error_code": "NOT_READY",
+                "message": "No HTML de Inbox disponible para extraer.",
+                "current_url": session.current_url,
             }
 
         selectors_cfg = self._load_outlook_selectors()
         field_patterns = selectors_cfg.get("field_patterns", {})
+        inbox_hint = bool(re.search(r"inbox|bandeja", source, re.IGNORECASE))
+        iframe_hint = "<iframe" in source.lower()
         data = {
             "subject": self._extract_with_patterns(source, field_patterns.get("subject", [])),
             "from": self._extract_with_patterns(source, field_patterns.get("from", [])),
-            "received_at": self._extract_with_patterns(source, field_patterns.get("received_at", [])),
+            "received": self._extract_with_patterns(source, field_patterns.get("received", field_patterns.get("received_at", []))),
             "preview": self._extract_with_patterns(source, field_patterns.get("preview", [])),
+            "url": session.current_url,
+
         }
 
-        if not all(data.values()):
+        if not all([data["subject"], data["from"], data["received"], data["preview"]]):
             session.status = "error"
-            session.last_error_code = "SELECTOR_BROKE"
+            session.last_error_code = "IFRAME_ISSUE" if iframe_hint else "SELECTOR_BROKE"
             snippet = re.sub(r"\s+", " ", source)[:400]
-            session.trace.append({"event": "selector_broke", "snippet": snippet})
+            artifacts = self._save_failure_artifacts(session, source)
+            session.trace.append({"event": "extract_failed", "snippet": snippet, **artifacts})
             self.memory.upsert_browser_session(session.session_id, session.model_dump(mode="json"))
             return {
                 "status": "error",
-                "error_code": "SELECTOR_BROKE",
-                "message": "No se pudo localizar el email más reciente con los selectores actuales.",
+                "error_code": session.last_error_code,
+                "message": "No se pudo localizar el email más reciente.",
                 "html_snippet": snippet,
                 "selectors_tried": field_patterns,
-                "dom_hints": {"has_inbox_keyword": "inbox" in source.lower(), "source_len": len(source)},
+                "dom_hints": {"has_inbox_keyword": inbox_hint, "has_iframe": iframe_hint, "source_len": len(source)},
                 "current_url": session.current_url,
+                **artifacts,
             }
 
+        data["received_at"] = data["received"]
         session.status = "ready"
         session.trace.append({"event": "extract_ok", "email": data})
         self.memory.upsert_browser_session(session.session_id, session.model_dump(mode="json"))
         return {"status": "ok", "email": data}
+
+    def extract_last_email(self, session_id: str, *, html: str | None = None) -> Dict[str, Any]:
+        return self.extract_latest_email_outlook_web(session_id, html=html)
 
     def execute_action(self, session_id: str, action: Dict[str, Any]) -> Dict[str, Any]:
         session = self.get_session(session_id)
         if session.status == "paused_login":
             return {
                 "status": "paused",
-                "error_code": "BROWSER_SESSION_PAUSED",
+                "error_code": "AUTH_REQUIRED",
                 "message": "Session paused waiting for user login/2FA. Resume from UI after manual auth.",
             }
 
         parsed = BrowserAction.model_validate(action)
-        # Controlled fallback: this platform provides browser contracts, but execution
-        # requires Playwright runtime in the worker service.
         if parsed.action != "screenshot":
             return {
                 "status": "error",
-                "error_code": "BROWSER_WORKER_UNAVAILABLE",
-                "message": "Browser worker Playwright runtime is not enabled in this service. Open an evolve proposal to deploy worker support.",
+                "error_code": "TOOL_NOT_IMPLEMENTED",
+                "message": "Browser worker Playwright runtime is not enabled in this service.",
                 "resolution_plan": [
                     "Enable worker service with Playwright dependencies",
                     "Bind browser session broker between data plane and worker",

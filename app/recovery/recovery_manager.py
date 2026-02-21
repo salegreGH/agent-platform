@@ -50,10 +50,7 @@ class RecoveryManager:
         fingerprint = f"{run.get('run_id')}:{run.get('metadata', {}).get('task_state')}:{classification}"
         attempts = self.memory.mark_attempt(fingerprint, failure_result.get("message", ""))
 
-        timeline = [
-            "Estoy analizando el error...",
-            f"Clasifiqué el fallo como {classification}.",
-        ]
+        timeline = [f"Clasifiqué el fallo como {classification}."]
 
         evidence_bundle = self.collect_evidence(run, session, failure_result)
         timeline.append("Recolecté evidencia automática (captura, HTML y logs de acciones).")
@@ -76,7 +73,7 @@ class RecoveryManager:
             timeline.append("Generé un fix que requiere aprobación.")
             return {"status": "proposal_required", "timeline": timeline, "evidence": evidence_bundle, "patch": patch_bundle}
 
-        timeline.append("Ejecuto test rápido y reintento extracción...")
+        timeline.append("Reintenté extracción con la nueva estrategia.")
         retry_result = retry_callback()
         return {
             "status": "recovered" if retry_result.get("status") == "ok" else "failed",

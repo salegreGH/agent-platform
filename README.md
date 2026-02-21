@@ -96,3 +96,24 @@ Inclou regressions per:
 Endpoints nous de suport:
 - `POST /core/run/{run_id}/mark_login_done`
 - `GET /core/run/{run_id}/state`
+
+## 8) Execution-first Outlook flow (MVP)
+
+- El progreso de UI se dibuja desde `run.steps[*].status` y no desde texto libre.
+- `run_steps` persiste estado real (`status`, `started_at`, `finished_at`, `output_json`, `error_json`).
+- Clasificación de errores: `AUTH_REQUIRED`, `NOT_READY`, `SELECTOR_BROKE`, `IFRAME_ISSUE`, `NAVIGATION_FAIL`, `TOOL_NOT_IMPLEMENTED`, `BUG_CORE`; `MISSING_CAPABILITY` solo si el tool no existe.
+- Botón **Ya hice login** valida sesión y lanza extracción automáticamente.
+- Botón **Reintentar** llama `/core/run/{run_id}/retry`, crea ejecución real y recovery con evidencia.
+
+### Auditoría de wiring
+
+- Reintentar → `POST /core/run/{run_id}/retry` → `CoreRuntimeService.retry_run` → `_mark_step(...running)` + worker extractor.
+- Login done → `POST /core/run/{run_id}/mark_login_done` → validación sesión + auto-extract.
+- `browser_session_id` del run se reutiliza si está READY para evitar repetir wizard.
+
+### Demo rápida
+
+1. Pedir: `ultimo email outlook`.
+2. Si pide login, pulsar **Abrir navegador** y autenticarse.
+3. Pulsar **Ya hice login** y ver extracción automática.
+4. Si falla por selectores, se adjunta evidencia (screenshot/html) y recovery automático.

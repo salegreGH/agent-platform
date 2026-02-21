@@ -13,21 +13,6 @@ from .task_graph import AntiLoopGuard, TaskPlanner, graph_to_dict
 
 
 class CoreRuntimeService:
-    RUN_STATES = {
-        "INIT",
-        "CHOOSE_STRATEGY",
-        "GRAPH_AUTH",
-        "GRAPH_NOT_VIABLE",
-        "BROWSER_START",
-        "WAITING_HUMAN_LOGIN",
-        "BROWSER_READY",
-        "EXTRACTING",
-        "VALIDATING",
-        "RETRYING",
-        "DONE",
-        "FAILED",
-    }
-
     def __init__(self, memory: Memory, m365_agent: M365EmailAgent, tool_registry: ToolRegistry, browser_agent: BrowserAgent | None = None, recovery_manager=None):
         self.memory = memory
         self.m365_agent = m365_agent
@@ -41,47 +26,22 @@ class CoreRuntimeService:
         raw = self.memory.get_connector_config("m365_outlook")
         if raw:
             cfg = ConnectorConfig.model_validate(raw)
-            return {
-                "m365_outlook": {
-                    "configured": cfg.enabled and bool(cfg.settings.get("tenant_id") and cfg.settings.get("client_id")),
-                    "scopes": cfg.scopes or ["Mail.Read", "User.Read"],
-                    "auth_mode": cfg.auth_mode,
-                }
-            }
+            return {"m365_outlook": {"configured": cfg.enabled and bool(cfg.settings.get("tenant_id") and cfg.settings.get("client_id")), "scopes": cfg.scopes or ["Mail.Read", "User.Read"], "auth_mode": cfg.auth_mode}}
 
         cfg = self.memory.get_json("m365.config") or {}
         ready = bool(cfg.get("tenant_id") and cfg.get("client_id"))
-        normalized = ConnectorConfig(
-            connector_id="m365_outlook",
-            enabled=True,
-            auth_mode=cfg.get("auth_mode") or "device_code",
-            scopes=cfg.get("scopes") or ["Mail.Read", "User.Read"],
-            settings=cfg,
-        )
+        normalized = ConnectorConfig(connector_id="m365_outlook", enabled=True, auth_mode=cfg.get("auth_mode") or "device_code", scopes=cfg.get("scopes") or ["Mail.Read", "User.Read"], settings=cfg)
         self.memory.upsert_connector_config("m365_outlook", normalized.model_dump(mode="json"))
-        return {
-            "m365_outlook": {
-                "configured": ready,
-                "scopes": normalized.scopes,
-                "auth_mode": normalized.auth_mode,
-            }
-        }
+        return {"m365_outlook": {"configured": ready, "scopes": normalized.scopes, "auth_mode": normalized.auth_mode}}
 
     def _new_run(self, goal: str, graph_payload: Dict[str, Any]) -> Run:
-        steps = [
-            RunStep(
-                id=n["id"],
-                agent=n["agent_id"],
-                action=n["action"],
-                dependencies=n.get("depends_on") or [],
-                status="pending",
-            )
-            for n in graph_payload.get("nodes", [])
-        ]
         run = Run(
             run_id=f"run-{uuid4().hex[:12]}",
             goal=goal,
-            steps=steps,
+            steps=[
+                RunStep(id="validate_session", kind="browser", agent="browser", action="browser.outlook.validate_session"),
+                RunStep(id="extract_latest_email", kind="browser", agent="browser", action="browser.outlook.extract_latest_email"),
+            ],
             status="running",
             metadata={
                 "graph": graph_payload,
@@ -89,183 +49,163 @@ class CoreRuntimeService:
                 "flags": {"graph_not_viable": False},
                 "strategy": None,
                 "browser_session_id": None,
+                "auth_status": "UNKNOWN",
+                "current_step": None,
                 "locale": "es",
                 "messages": [],
             },
         )
-        self.memory.upsert_run(run.run_id, goal, run.status, run.model_dump(mode="json"))
+        self._save_run(run)
         return run
 
     def _save_run(self, run: Run):
         run.updated_at = datetime.now(timezone.utc)
         self.memory.upsert_run(run.run_id, run.goal, run.status, run.model_dump(mode="json"))
 
-    def _get_active_run(self) -> Optional[Run]:
-        run_id = self.memory.get_json("chat.active_run_id")
-        if not run_id:
-            return None
-        payload = self.memory.get_run(run_id)
-        if not payload:
-            return None
-        return Run.model_validate(payload)
-
     def _set_active_run(self, run_id: Optional[str]):
         self.memory.set_json("chat.active_run_id", run_id)
 
-    @staticmethod
-    def _detect_locale(text: str) -> str:
-        t = (text or "").lower()
-        if any(k in t for k in ["dame", "ultimo", "puedo", "permisos", "correo"]):
-            return "es"
-        if any(k in t for k in ["últim", "correu", "permisos", "puc"]):
-            return "ca"
-        return "es"
+    def _get_active_run(self) -> Optional[Run]:
+        run_id = self.memory.get_json("chat.active_run_id")
+        payload = self.memory.get_run(run_id) if run_id else None
+        return Run.model_validate(payload) if payload else None
 
     @staticmethod
     def _is_graph_unviable_intent(text: str) -> bool:
         t = (text or "").lower()
-        markers = ["no es viable", "no és viable", "no puc", "no puedo", "no tinc permisos", "no tengo permisos", "no soc admin", "no soy admin"]
-        return any(m in t for m in markers)
+        return any(m in t for m in ["no es viable", "no puedo", "no tinc permisos", "no tengo permisos"])
 
     @staticmethod
     def _is_login_done_intent(text: str) -> bool:
         t = (text or "").lower()
-        markers = ["he fet login", "ya hice login", "listo", "continua", "continuar", "done login"]
-        return any(m in t for m in markers)
+        return any(m in t for m in ["ya hice login", "he fet login", "continuar", "done login", "listo"])
+
+
+    def _human_reply(self, understood: str, doing: str, need: str, ctas: list[dict[str, str]]) -> Dict[str, Any]:
+        return {
+            "reply": f"Entendido: {understood}\n\nQué haré ahora: {doing}\n\nQué necesito de ti: {need}\n\nSiguiente paso: usa uno de los botones.",
+            "actions": ctas,
+        }
 
     def _remember_browser_preference(self):
         prefs = self.memory.get_json("memory.user_preferences") or {}
         prefs["outlook_strategy"] = "browser"
         self.memory.set_json("memory.user_preferences", prefs)
 
-    def _append_message(self, run: Run, msg: str):
-        run.metadata.setdefault("messages", []).append(msg)
+    def _mark_step(self, run: Run, step_id: str, status: str, output: Dict[str, Any] | None = None, error: Dict[str, Any] | None = None):
+        now = datetime.now(timezone.utc)
+        for step in run.steps:
+            if step.id == step_id:
+                step.status = status
+                if status == "running" and not step.started_at:
+                    step.started_at = now
+                if status in {"completed", "failed", "blocked"}:
+                    step.finished_at = now
+                if output:
+                    step.output_json = output
+                    step.outputs = output
+                if error:
+                    step.error_json = error
+                    step.error = error.get("message")
+                self.memory.upsert_run_step(
+                    step_id=f"{run.run_id}:{step_id}:{int(now.timestamp()*1000)}",
+                    run_id=run.run_id,
+                    status=status,
+                    started_at=step.started_at.timestamp() if step.started_at else None,
+                    finished_at=step.finished_at.timestamp() if step.finished_at else None,
+                    output_json=step.output_json,
+                    error_json=step.error_json,
+                )
+                break
+        run.metadata["current_step"] = step_id
 
-    def _human_reply(self, locale: str, understood: str, doing: str, need: str, ctas: list[dict[str, str]]) -> Dict[str, Any]:
-        label_next = "Siguiente paso" if locale == "es" else "Proper pas"
-        return {
-            "reply": f"Entendido: {understood}\n\nQué haré ahora: {doing}\n\nQué necesito de ti: {need}\n\n{label_next}: usa uno de los botones.",
-            "actions": ctas,
-        }
+    def _classify_error(self, error_code: str) -> str:
+        known = {"AUTH_REQUIRED", "NOT_READY", "SELECTOR_BROKE", "IFRAME_ISSUE", "NAVIGATION_FAIL", "TOOL_NOT_IMPLEMENTED", "BUG_CORE"}
+        if error_code in known:
+            return error_code
+        tool_exists = bool(self.browser_agent and self.browser_agent.has_action("browser.outlook.extract_latest_email"))
+        if not tool_exists:
+            return "MISSING_CAPABILITY"
+        return "BUG_CORE"
 
-    def _get_session_payload(self, session_id: str | None) -> Dict[str, Any] | None:
-        if not session_id:
-            return None
-        try:
-            return self.browser_agent.get_session(session_id).model_dump(mode="json") if self.browser_agent else None
-        except Exception:
-            return None
-
-    def _ensure_browser_flow(self, run: Run, user_text: str) -> Dict[str, Any]:
-        run.metadata["task_state"] = "BROWSER_START"
+    def _ensure_browser_flow(self, run: Run) -> Dict[str, Any]:
         run.metadata["strategy"] = "browser"
         run.metadata.setdefault("flags", {})["graph_not_viable"] = True
         self._remember_browser_preference()
-
         if not self.browser_agent:
-            run.metadata["task_state"] = "FAILED"
             run.status = "failed"
+            run.metadata["task_state"] = "FAILED"
             self._save_run(run)
-            return {"reply": "No puedo abrir navegador porque BrowserAgent está desactivado.", "run": run.model_dump(mode="json")}
+            return {"reply": "No he podido ejecutar navegador porque BrowserAgent no está disponible.", "run": run.model_dump(mode="json")}
+
+        # reuse READY session to avoid repeating wizard
+        session_id = run.metadata.get("browser_session_id")
+        if session_id:
+            session = self.browser_agent.get_session(session_id)
+            if session.login_detected and session.status in {"ready", "running", "open"}:
+                run.metadata["auth_status"] = "READY"
+                run.metadata["task_state"] = "BROWSER_READY"
+                self._save_run(run)
+                out = self._run_browser_extract_step(run, session_id)
+                out["wizard"] = {"show": True, "state": "DONE" if out.get("status") == "ok" else "ERROR", "session_id": session_id, "status_text": "Hecho" if out.get("status") == "ok" else "Error"}
+                return out
 
         session = self.browser_agent.start_session("https://outlook.office.com/mail/")
         paused = self.browser_agent.pause_for_user_login(session.session_id, reason="Esperando login en Outlook Web")
         run.metadata["browser_session_id"] = paused.session_id
         run.metadata["task_state"] = "WAITING_HUMAN_LOGIN"
-        self._append_message(run, user_text)
+        run.metadata["auth_status"] = "AUTH_REQUIRED"
         self._save_run(run)
         return {
-            **self._human_reply(
-                run.metadata.get("locale", "es"),
-                "No puedes usar Graph/device code en este entorno.",
-                "Cambio automáticamente a la vía navegador y dejo bloqueado Graph para este run.",
-                "1) Pulsa 'Abrir navegador'. 2) Haz login + 2FA. 3) Pulsa 'Ya hice login'.",
-                [
-                    {"id": "open_browser", "label": "Abrir navegador", "kind": "open_browser"},
-                    {"id": "done_login", "label": "Ya hice login", "kind": "mark_login_done"},
-                ],
-            ),
+            "reply": "Cambio automáticamente a la vía navegador. Necesito tu ayuda: abre navegador y completa login en Outlook.",
+            "actions": [{"id": "open_browser", "label": "Abrir navegador", "kind": "open_browser"}, {"id": "done_login", "label": "Ya hice login", "kind": "mark_login_done"}],
             "run": run.model_dump(mode="json"),
-            "wizard": {
-                "show": True,
-                "state": "BROWSER_WAITING_FOR_LOGIN",
-                "session_id": paused.session_id,
-                "status_text": "Esperando login...",
-            },
+            "wizard": {"show": True, "state": "BROWSER_WAITING_FOR_LOGIN", "session_id": paused.session_id, "status_text": "Esperando login"},
         }
+
+    def _run_browser_extract_step(self, run: Run, session_id: str) -> Dict[str, Any]:
+        run.status = "running"
+        run.metadata["task_state"] = "EXTRACTING"
+        self._mark_step(run, "extract_latest_email", "running")
+        self._save_run(run)
+
+        html = run.metadata.get("browser_inbox_html")
+        result = self.browser_agent.extract_latest_email_outlook_web(session_id, html=html)
+        if result.get("status") == "ok":
+            self._mark_step(run, "extract_latest_email", "completed", output=result)
+            run.metadata["task_state"] = "DONE"
+            run.metadata["auth_status"] = "READY"
+            run.metadata["result"] = {"status": "ok", "strategy": "browser", "email": result["email"]}
+            run.status = "completed"
+            self._set_active_run(None)
+            self._save_run(run)
+            return {"status": "ok", "reply": "Extracción completada.", "run": run.model_dump(mode="json"), "result": run.metadata["result"]}
+
+        classification = self._classify_error(result.get("error_code", "BUG_CORE"))
+        self._mark_step(run, "extract_latest_email", "failed", error={"classification": classification, **result})
+        run.metadata["task_state"] = "FAILED"
+        run.metadata["triage"] = {"classification": classification, "error_code": result.get("error_code"), "raw": result}
+        run.status = "failed"
+        self._save_run(run)
+        return {"status": "error", "reply": f"No he podido ejecutar extracción porque {classification}.", "run": run.model_dump(mode="json"), "result": result}
 
     def _continue_browser_after_login(self, run: Run) -> Dict[str, Any]:
         session_id = run.metadata.get("browser_session_id")
         if not session_id or not self.browser_agent:
-            run.metadata["task_state"] = "FAILED"
-            run.status = "failed"
-            self._save_run(run)
-            return {"reply": "No encuentro sesión de navegador para continuar.", "run": run.model_dump(mode="json")}
+            return {"reply": "No he podido ejecutar validación de sesión porque no hay browser_session_id.", "run": run.model_dump(mode="json")}
 
+        self._mark_step(run, "validate_session", "running")
         session = self.browser_agent.mark_login_done(session_id)
-        run.metadata["task_state"] = "BROWSER_READY"
-        run.metadata["login_detected"] = bool(session.login_detected)
-        run.status = "running"
+        run.metadata["auth_status"] = "READY" if session.login_detected else "AUTH_REQUIRED"
+        run.metadata["task_state"] = "BROWSER_READY" if session.login_detected else "WAITING_HUMAN_LOGIN"
+        self._mark_step(run, "validate_session", "completed", output={"login_detected": session.login_detected, "session_id": session_id})
         self._save_run(run)
 
-        extraction = self._run_browser_extract_step(run, session_id)
-        if extraction.get("status") == "ok":
-            reply = (
-                "Entendido: ya confirmaste login.\n\n"
-                "Ahora mismo estoy haciendo: extraje y validé el último email en navegador.\n\n"
-                "Estado: paso 4/4 (DONE).\n\n"
-                "Si no necesito tu ayuda: sigo automáticamente."
-            )
-            return {"reply": reply, "run": extraction["run"], "result": extraction["result"], "wizard": {"show": True, "state": "DONE", "session_id": session_id, "status_text": "Hecho"}}
-
-        recovery = self.retry_run(run.run_id)
-        if recovery.get("status") == "ok":
-            return recovery
-        return {
-            "reply": "\n".join(recovery.get("timeline", ["No pude recuperar automáticamente."])),
-            "actions": [{"id": "retry", "label": "Reintentar", "kind": "retry"}],
-            "run": recovery.get("run") or extraction["run"],
-            "result": recovery.get("result") or extraction.get("result"),
-            "wizard": {"show": True, "state": "ERROR", "session_id": session_id, "status_text": "Error clasificado"},
-        }
-
-    @staticmethod
-    def _triage(error_code: str) -> str:
-        mapping = {
-            "AUTH_REQUIRED": "AUTH_REQUIRED",
-            "SELECTOR_BROKE": "SELECTOR_BROKE",
-            "NAVIGATION_FAIL": "NAVIGATION_FAIL",
-            "MISSING_CAPABILITY": "MISSING_CAPABILITY",
-        }
-        return mapping.get(error_code, "BUG_CORE")
-
-    def _run_browser_extract_step(self, run: Run, session_id: str) -> Dict[str, Any]:
-        run.metadata["task_state"] = "EXTRACTING"
-        html = run.metadata.get("browser_inbox_html")
-        result = self.browser_agent.extract_last_email(session_id, html=html)
-        if result.get("status") == "ok":
-            run.metadata["task_state"] = "VALIDATING"
-            email = result["email"]
-            valid = all(email.get(k) for k in ["subject", "from", "received_at", "preview"])
-            if valid:
-                run.metadata["task_state"] = "DONE"
-                run.status = "completed"
-                run.metadata["result"] = {"status": "ok", "strategy": "browser", "email": email}
-                self._set_active_run(None)
-                self._save_run(run)
-                return {"status": "ok", "run": run.model_dump(mode="json"), "result": run.metadata["result"]}
-
-        run.metadata["task_state"] = "FAILED"
-        run.status = "failed"
-        error_code = result.get("error_code", "BUG_CORE")
-        run.metadata["triage"] = {
-            "classification": self._triage(error_code),
-            "error_code": error_code,
-            "raw": result,
-        }
-        self._save_run(run)
-        self._set_active_run(None)
-        return {"status": "error", "run": run.model_dump(mode="json"), "result": result}
+        if not session.login_detected:
+            return {"reply": "No he podido validar Inbox. Vuelve a intentar login.", "run": run.model_dump(mode="json")}
+        out = self._run_browser_extract_step(run, session_id)
+        out["wizard"] = {"show": True, "state": "DONE" if out.get("status") == "ok" else "ERROR", "session_id": session_id, "status_text": "Hecho" if out.get("status") == "ok" else "Error"}
+        return out
 
     def retry_run(self, run_id: str) -> Dict[str, Any]:
         payload = self.memory.get_run(run_id)
@@ -275,39 +215,27 @@ class CoreRuntimeService:
         session_id = run.metadata.get("browser_session_id")
         if not session_id:
             return {"ok": False, "error": "browser_session_not_found"}
+
+        self._mark_step(run, "extract_latest_email", "running")
+        self._save_run(run)
+
         if not self.recovery_manager:
-            result = self._run_browser_extract_step(run, session_id)
-            return {"status": "ok" if result.get("status") == "ok" else "error", "run": result.get("run"), "result": result.get("result")}
+            out = self._run_browser_extract_step(run, session_id)
+            out["wizard"] = {"show": True, "state": "DONE" if out.get("status") == "ok" else "ERROR", "session_id": session_id, "status_text": "Hecho" if out.get("status") == "ok" else "Error"}
+            return out
 
         failure_result = (run.metadata.get("triage") or {}).get("raw") or {}
         recovery = self.recovery_manager.retry(
             run=run.model_dump(mode="json"),
             failure_result=failure_result,
-            session=self._get_session_payload(session_id),
+            session=self.browser_agent.get_session(session_id).model_dump(mode="json") if self.browser_agent else None,
             retry_callback=lambda: self._run_browser_extract_step(run, session_id),
         )
         updated_payload = self.memory.get_run(run_id)
         updated_run = Run.model_validate(updated_payload) if updated_payload else run
-        updated_run.metadata["recovery"] = {
-            "timeline": recovery.get("timeline", []),
-            "evidence": recovery.get("evidence", {}),
-            "attempts": recovery.get("attempts", 0),
-            "status": recovery.get("status"),
-        }
+        updated_run.metadata["recovery"] = {"timeline": recovery.get("timeline", []), "evidence": recovery.get("evidence", {}), "attempts": recovery.get("attempts", 0), "status": recovery.get("status")}
         self._save_run(updated_run)
-        if recovery.get("status") == "recovered":
-            return {
-                "status": "ok",
-                "reply": "\n".join(recovery.get("timeline", []) + ["Reintento completado: extracción recuperada."]),
-                "run": updated_run.model_dump(mode="json"),
-                "result": updated_run.metadata.get("result"),
-            }
-        return {
-            "status": "error",
-            "timeline": recovery.get("timeline", []),
-            "run": updated_run.model_dump(mode="json"),
-            "result": failure_result,
-        }
+        return {"status": "ok" if recovery.get("status") == "recovered" else "error", "reply": "\n".join(recovery.get("timeline", [])), "run": updated_run.model_dump(mode="json"), "result": updated_run.metadata.get("result")}
 
     def get_run_state(self, run_id: str) -> Dict[str, Any]:
         payload = self.memory.get_run(run_id)
@@ -318,7 +246,7 @@ class CoreRuntimeService:
 
     def start_browser_session(self, run_id: str | None = None, start_url: str | None = None) -> Dict[str, Any]:
         if not self.browser_agent:
-            return {"ok": False, "error_code": "BROWSER_AGENT_DISABLED", "message": "Browser agent is disabled."}
+            return {"ok": False, "error_code": "TOOL_NOT_IMPLEMENTED", "message": "Browser agent is disabled."}
         session = self.browser_agent.start_session(start_url or "https://outlook.office.com/mail/")
         paused = self.browser_agent.pause_for_user_login(session.session_id, reason="Esperando login en Outlook Web")
         if run_id:
@@ -327,6 +255,7 @@ class CoreRuntimeService:
                 run = Run.model_validate(payload)
                 run.metadata["browser_session_id"] = paused.session_id
                 run.metadata["task_state"] = "WAITING_HUMAN_LOGIN"
+                run.metadata["auth_status"] = "AUTH_REQUIRED"
                 self._save_run(run)
         return {"ok": True, "session": paused.model_dump(mode="json")}
 
@@ -334,18 +263,13 @@ class CoreRuntimeService:
         payload = self.memory.get_run(run_id)
         if not payload:
             return {"ok": False, "error": "run_not_found"}
-        run = Run.model_validate(payload)
-        return self._continue_browser_after_login(run)
+        return self._continue_browser_after_login(Run.model_validate(payload))
 
     def pause_browser_for_login(self, session_id: str) -> Dict[str, Any]:
-        if not self.browser_agent:
-            return {"ok": False, "error_code": "BROWSER_AGENT_DISABLED", "message": "Browser agent is disabled."}
         session = self.browser_agent.pause_for_user_login(session_id)
         return {"ok": True, "session": session.model_dump(mode="json")}
 
     def resume_browser_session(self, session_id: str) -> Dict[str, Any]:
-        if not self.browser_agent:
-            return {"ok": False, "error_code": "BROWSER_AGENT_DISABLED", "message": "Browser agent is disabled."}
         session = self.browser_agent.resume(session_id)
         return {"ok": True, "session": session.model_dump(mode="json")}
 
@@ -358,46 +282,30 @@ class CoreRuntimeService:
             status = self.connectors_status()
             graph = self.planner.plan(goal=user_text, connector_ready=status["m365_outlook"]["configured"])
             run = self._new_run(user_text, graph_to_dict(graph))
-            run.metadata["locale"] = self._detect_locale(user_text)
-            run.metadata["task_state"] = "CHOOSE_STRATEGY"
             self._set_active_run(run.run_id)
-            if not status['m365_outlook']['configured']:
-                run.status = 'blocked'
-                run.metadata['task_state'] = 'FAILED'
+            if not status["m365_outlook"]["configured"]:
+                run.status = "blocked"
+                run.metadata["task_state"] = "FAILED"
                 self._save_run(run)
                 self._set_active_run(None)
-                return {'reply': 'Necesito configurar Outlook antes de continuar.', 'run': run.model_dump(mode='json'), 'graph': run.metadata.get('graph'), 'result': {'status': 'needs_form', 'fields': self.m365_agent.config_questions()}}
+                return {"reply": "Necesito configurar Outlook antes de continuar.", "run": run.model_dump(mode="json"), "graph": run.metadata.get("graph"), "result": {"status": "needs_form", "fields": self.m365_agent.config_questions()}}
 
-        if self._is_graph_unviable_intent(user_text):
-            run.metadata["task_state"] = "GRAPH_NOT_VIABLE"
-            run.metadata.setdefault("flags", {})["graph_not_viable"] = True
-            return self._ensure_browser_flow(run, user_text)
+        if self._is_login_done_intent(user_text):
+            return self._continue_browser_after_login(run)
 
-        state = run.metadata.get("task_state")
-        prefs = self.memory.get_json("memory.user_preferences") or {}
-        prefer_browser = prefs.get("outlook_strategy") == "browser"
-        graph_not_viable = bool(run.metadata.get("flags", {}).get("graph_not_viable"))
-
-        if state in {"WAITING_HUMAN_LOGIN", "BROWSER_START"}:
-            if self._is_login_done_intent(user_text):
-                return self._continue_browser_after_login(run)
+        if run.metadata.get("task_state") == "WAITING_HUMAN_LOGIN" and not self._is_login_done_intent(user_text):
             return {
-                **self._human_reply(
-                    run.metadata.get("locale", "es"),
-                    "Estamos en espera de tu login en navegador.",
-                    "Mantengo el run en pausa sin volver a Graph.",
-                    "Pulsa 'Abrir navegador' y luego 'Ya hice login'.",
-                    [
-                        {"id": "open_browser", "label": "Abrir navegador", "kind": "open_browser"},
-                        {"id": "done_login", "label": "Ya hice login", "kind": "mark_login_done"},
-                    ],
-                ),
+                "reply": "Intenté extraer el email, pero no he podido ejecutar la extracción porque falta login válido en Inbox.",
+                "actions": [{"id": "open_browser", "label": "Abrir navegador", "kind": "open_browser"}, {"id": "done_login", "label": "Ya hice login", "kind": "mark_login_done"}],
                 "run": run.model_dump(mode="json"),
-                "wizard": {"show": True, "state": "BROWSER_WAITING_FOR_LOGIN", "session_id": run.metadata.get("browser_session_id"), "status_text": "Esperando login..."},
+                "wizard": {"show": True, "state": "BROWSER_WAITING_FOR_LOGIN", "session_id": run.metadata.get("browser_session_id"), "status_text": "Esperando login"},
             }
+        if self._is_graph_unviable_intent(user_text):
+            return self._ensure_browser_flow(run)
 
-        if prefer_browser or graph_not_viable:
-            return self._ensure_browser_flow(run, user_text)
+        prefs = self.memory.get_json("memory.user_preferences") or {}
+        if prefs.get("outlook_strategy") == "browser" or run.metadata.get("auth_status") == "READY":
+            return self._ensure_browser_flow(run)
 
         run.metadata["strategy"] = "graph"
         run.metadata["task_state"] = "EXTRACTING"
@@ -409,27 +317,22 @@ class CoreRuntimeService:
             self._save_run(run)
             return {
                 **self._human_reply(
-                    run.metadata.get("locale", "es"),
                     "Quieres el último email de Outlook.",
                     "Primero intento Graph porque está configurado.",
-                    "Completa el login con el código o pulsa 'Cambiar a navegador' si no es viable.",
+                    "Completa login de Microsoft o cambia a navegador.",
                     [
                         {"id": "open_ms", "label": "Abrir web de Microsoft", "kind": "open_device_login", "url": "https://microsoft.com/devicelogin"},
                         {"id": "switch_browser", "label": "Cambiar a navegador", "kind": "switch_browser"},
                     ],
                 ),
                 "run": run.model_dump(mode="json"),
-                "device_code_message": result.get("message", ""),
             }
 
         run.metadata["task_state"] = "DONE" if result.get("status") == "ok" else "FAILED"
         run.status = "completed" if result.get("status") == "ok" else "failed"
         self._set_active_run(None)
         self._save_run(run)
-        if result.get("status") == "ok":
-            return {"reply": "Listo. Ya tengo el último email.", "run": run.model_dump(mode="json"), "result": result}
-        return {"reply": "No pude completar la consulta.", "run": run.model_dump(mode="json"), "result": result}
+        return {"reply": "Listo." if result.get("status") == "ok" else "No he podido completar la consulta.", "run": run.model_dump(mode="json"), "result": result}
 
-    # Backwards compatible
     def execute(self, request: Dict[str, Any]) -> Dict[str, Any]:
         return self.converse(request.get("message", ""))

@@ -69,6 +69,18 @@ class Memory:
             )"""
             )
             c.execute(
+                """CREATE TABLE IF NOT EXISTS run_steps(
+                step_id TEXT PRIMARY KEY,
+                run_id TEXT NOT NULL,
+                status TEXT NOT NULL,
+                started_at REAL,
+                finished_at REAL,
+                output_json TEXT,
+                error_json TEXT,
+                updated_at REAL NOT NULL
+            )"""
+            )
+            c.execute(
                 """CREATE TABLE IF NOT EXISTS connector_configs(
                 connector_id TEXT PRIMARY KEY,
                 config_json TEXT NOT NULL,
@@ -276,3 +288,50 @@ class Memory:
         with self._conn() as c:
             row = c.execute("SELECT attempts FROM loop_guard WHERE fingerprint=?", (fingerprint,)).fetchone()
             return int(row[0]) if row else 0
+
+    def upsert_run_step(
+        self,
+        *,
+        step_id: str,
+        run_id: str,
+        status: str,
+        started_at: float | None = None,
+        finished_at: float | None = None,
+        output_json: Dict[str, Any] | None = None,
+        error_json: Dict[str, Any] | None = None,
+    ):
+        with self._conn() as c:
+            c.execute(
+                """INSERT OR REPLACE INTO run_steps(step_id,run_id,status,started_at,finished_at,output_json,error_json,updated_at)
+                VALUES(?,?,?,?,?,?,?,?)""",
+                (
+                    step_id,
+                    run_id,
+                    status,
+                    started_at,
+                    finished_at,
+                    json.dumps(output_json or {}, ensure_ascii=False),
+                    json.dumps(error_json or {}, ensure_ascii=False),
+                    time.time(),
+                ),
+            )
+            c.commit()
+
+    def list_run_steps(self, run_id: str) -> List[Dict[str, Any]]:
+        with self._conn() as c:
+            rows = c.execute(
+                "SELECT step_id,status,started_at,finished_at,output_json,error_json,updated_at FROM run_steps WHERE run_id=? ORDER BY updated_at ASC",
+                (run_id,),
+            ).fetchall()
+            return [
+                {
+                    "step_id": r[0],
+                    "status": r[1],
+                    "started_at": r[2],
+                    "finished_at": r[3],
+                    "output_json": json.loads(r[4] or "{}"),
+                    "error_json": json.loads(r[5] or "{}"),
+                    "updated_at": r[6],
+                }
+                for r in rows
+            ]
