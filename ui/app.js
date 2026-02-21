@@ -64,7 +64,7 @@ function App(){
     )));
     if(sidebarTab==="files") return React.createElement('div',{},React.createElement('input',{type:'file',onChange:uploadFile,className:'text-xs'}),React.createElement('div',{className:'text-xs text-slate-400 mt-2'},'Els adjunts es guarden al workspace.'));
     if(sidebarTab==="tests") return React.createElement('div',{className:'text-xs text-slate-300'},'Regression dashboard pendent de connectors e2e.');
-    if(sidebarTab==="evolve") return React.createElement('div',{className:'text-xs text-slate-300'},\`Pipeline d'evolució activa: proposals → approve → tests → release/rollback.\`);
+    if(sidebarTab==="evolve") return React.createElement('div',{className:'text-xs text-slate-300'},`Pipeline d'evolució activa: proposals → approve → tests → release/rollback.`);
     if(sidebarTab==="logs") return React.createElement('div',{},React.createElement('button',{onClick:refreshLogs,className:'px-2 py-1 bg-slate-700 rounded text-xs mb-2'},'Refresh'),React.createElement('pre',{className:'text-xs whitespace-pre-wrap'},logsText));
     if(sidebarTab==="settings") return React.createElement('div',{className:'text-xs text-slate-300'},`Workspace: ${state.configs?.workspace||'-'}`);
     return React.createElement('div',{className:'text-xs text-slate-400'},'Mode control plane actiu.');
