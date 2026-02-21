@@ -58,6 +58,30 @@ class Memory:
                 updated_at REAL NOT NULL
             )"""
             )
+            c.execute(
+                """CREATE TABLE IF NOT EXISTS runs(
+                run_id TEXT PRIMARY KEY,
+                goal TEXT NOT NULL,
+                status TEXT NOT NULL,
+                run_json TEXT NOT NULL,
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL
+            )"""
+            )
+            c.execute(
+                """CREATE TABLE IF NOT EXISTS connector_configs(
+                connector_id TEXT PRIMARY KEY,
+                config_json TEXT NOT NULL,
+                updated_at REAL NOT NULL
+            )"""
+            )
+            c.execute(
+                """CREATE TABLE IF NOT EXISTS browser_sessions(
+                session_id TEXT PRIMARY KEY,
+                session_json TEXT NOT NULL,
+                updated_at REAL NOT NULL
+            )"""
+            )
             c.commit()
 
     def set_json(self, k: str, v: Any):
@@ -135,6 +159,61 @@ class Memory:
                 {"task_id": r[0], "goal": r[1], "status": r[2], "payload": json.loads(r[3] or "{}"), "updated_at": r[4]}
                 for r in rows
             ]
+
+    def upsert_run(self, run_id: str, goal: str, status: str, run_json: Dict[str, Any]):
+        ts = time.time()
+        with self._conn() as c:
+            c.execute(
+                "INSERT OR REPLACE INTO runs(run_id,goal,status,run_json,created_at,updated_at) VALUES(?,?,?,?,COALESCE((SELECT created_at FROM runs WHERE run_id=?),?),?)",
+                (run_id, goal, status, json.dumps(run_json, ensure_ascii=False), run_id, ts, ts),
+            )
+            c.commit()
+
+    def get_run(self, run_id: str) -> Optional[Dict[str, Any]]:
+        with self._conn() as c:
+            row = c.execute("SELECT run_json FROM runs WHERE run_id=?", (run_id,)).fetchone()
+            return json.loads(row[0]) if row else None
+
+    def list_runs(self) -> List[Dict[str, Any]]:
+        with self._conn() as c:
+            rows = c.execute("SELECT run_json FROM runs ORDER BY updated_at DESC LIMIT 100").fetchall()
+            return [json.loads(r[0]) for r in rows]
+
+    def upsert_connector_config(self, connector_id: str, config: Dict[str, Any]):
+        with self._conn() as c:
+            c.execute(
+                "INSERT OR REPLACE INTO connector_configs(connector_id,config_json,updated_at) VALUES(?,?,?)",
+                (connector_id, json.dumps(config, ensure_ascii=False), time.time()),
+            )
+            c.commit()
+
+    def get_connector_config(self, connector_id: str) -> Optional[Dict[str, Any]]:
+        with self._conn() as c:
+            row = c.execute("SELECT config_json FROM connector_configs WHERE connector_id=?", (connector_id,)).fetchone()
+            return json.loads(row[0]) if row else None
+
+    def list_connector_configs(self) -> List[Dict[str, Any]]:
+        with self._conn() as c:
+            rows = c.execute("SELECT config_json FROM connector_configs ORDER BY updated_at DESC").fetchall()
+            return [json.loads(r[0]) for r in rows]
+
+    def upsert_browser_session(self, session_id: str, session: Dict[str, Any]):
+        with self._conn() as c:
+            c.execute(
+                "INSERT OR REPLACE INTO browser_sessions(session_id,session_json,updated_at) VALUES(?,?,?)",
+                (session_id, json.dumps(session, ensure_ascii=False), time.time()),
+            )
+            c.commit()
+
+    def get_browser_session(self, session_id: str) -> Optional[Dict[str, Any]]:
+        with self._conn() as c:
+            row = c.execute("SELECT session_json FROM browser_sessions WHERE session_id=?", (session_id,)).fetchone()
+            return json.loads(row[0]) if row else None
+
+    def list_browser_sessions(self) -> List[Dict[str, Any]]:
+        with self._conn() as c:
+            rows = c.execute("SELECT session_json FROM browser_sessions ORDER BY updated_at DESC LIMIT 50").fetchall()
+            return [json.loads(r[0]) for r in rows]
 
     def upsert_form(self, form_id: str, form_type: str, status: str, schema: Dict[str, Any], values: Optional[Dict[str, Any]] = None):
         ts = time.time()
